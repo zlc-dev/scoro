@@ -1,0 +1,114 @@
+#include "awaiter.hpp"
+#include "coro.hpp"
+#include <atomic>
+#include <coroutine>
+#include <exception>
+#include <print>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+
+using namespace std::chrono_literals;
+using namespace coro;
+
+
+template<typename Promise>
+struct ThisCoroutine {
+    bool await_ready() {
+        return false;
+    }
+
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) {
+        m_this = h;
+        return h;
+    }
+
+    std::coroutine_handle<Promise> await_resume() {
+        return m_this;
+    }
+
+private:
+    std::coroutine_handle<Promise> m_this;
+};
+
+Future<int> fib(int x) {
+    if (x < 0) {
+        co_return co_await fib(x + 2) - co_await fib(x + 1);
+    } else if (x < 2) {
+        co_return x;
+    } else {
+        co_return co_await fib(x - 1) + co_await fib(x - 2);
+    }
+}
+
+Future<int> test_success() {
+    co_await sleep_for(500ms);
+    co_return 42;
+}
+
+Future<void> test_fail() {
+    if(co_await with_timeout(sleep_for(1000ms), 200ms)) {
+        std::println("{}", 42);
+    } else {
+        throw std::runtime_error("timeout");
+    }
+    co_return;
+}
+
+void test_timeout() {
+    WaitableFuture<int> future = make_waitable(test_success());
+    if(!future.wait_for(200ms)) {
+        std::println("time out");
+        forget(std::move(future).detach());
+        return;
+    }
+    try {
+        std::println("{}", future.get());
+    } catch (const std::exception& e) {
+        std::println(std::cerr, "error: {}", e.what());
+    }
+}
+
+int main() {
+    test_timeout();
+
+    std::atomic_flag finish {};
+    with_callback(
+        test_success(),
+        [](int x) { std::println("{}", x); },
+        [](std::exception_ptr exception) {
+            try { 
+                std::rethrow_exception(exception); 
+            }
+            catch (const std::exception& e) {
+                std::println(std::cerr, "error: {}", e.what());
+            }
+        },
+        [&]() {
+            finish.test_and_set();
+            finish.notify_all();
+        }
+    );
+    finish.wait(false);
+
+    finish.clear();
+    with_callback(
+        test_fail(),
+        []() { std::println("???"); },
+        [](std::exception_ptr exception) {
+            try { 
+                std::rethrow_exception(exception); 
+            }
+            catch (const std::exception& e) {
+                std::println(std::cerr, "error: {}", e.what());
+            }
+        },
+        [&]() {
+            finish.test_and_set();
+            finish.notify_all();
+        }
+    );
+    finish.wait(false);
+
+    return 0;
+}

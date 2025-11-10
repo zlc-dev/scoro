@@ -1,0 +1,14 @@
+out/
+build/
+install/
+CMakeFiles/
+.clangd
+CMakeUserPresets.json
+.vscode/*.json
+.vs/
+_deps/
+_vendors/
+*.o
+*.lib
+*.spv
+tmp/

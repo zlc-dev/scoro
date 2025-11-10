@@ -1,0 +1,11 @@
+CompileFlags:
+    Add:
+        - -Wall
+        - -Wno-deprecated-declarations
+        - -Wno-c++98-compat
+        - -Wno-c++98-compat-pedantic
+        - -Wno-c++11-compat
+        - -Wno-c99-compat
+        - -Wno-unused-macros
+    CompilationDatabase: 
+        ${CMAKE_BINARY_DIR}
