@@ -5,7 +5,6 @@
 #include <cassert>
 #include <coroutine>
 #include <exception>
-#include <functional>
 #include <iostream>
 #include <optional>
 #include <print>
@@ -35,7 +34,14 @@ public:
 
 struct [[maybe_unused]] TrivialFuture {
     using promise_type = TrivialPromise;
-    TrivialFuture(std::coroutine_handle<promise_type> h) {}
+    TrivialFuture(std::coroutine_handle<promise_type> h): m_coroutine(h) {}
+    TrivialFuture(const TrivialFuture& oth): m_coroutine(oth.m_coroutine) {}
+    std::coroutine_handle<promise_type> get_coroutine() {
+        return m_coroutine;
+    }
+
+private:
+    std::coroutine_handle<promise_type> m_coroutine;
 };
 
 template<

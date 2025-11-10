@@ -2,8 +2,10 @@
 
 #include "timer.hpp"
 #include "coro.hpp"
+#include <atomic>
 #include <chrono>
 #include <coroutine>
+#include <memory>
 #include <print>
 #include <utility>
 
@@ -57,7 +59,8 @@ private:
     struct State {
         enum {
             ePending = 0,
-            eValid
+            eValid,
+            eTimeout
         };
 
         alignas(alignof(R)) std::byte buf[sizeof(R)];
@@ -65,7 +68,7 @@ private:
         std::coroutine_handle<> caller;
 
         ~State() {
-            if (state.load(std::memory_order_acquire) == ePending) {
+            if (state.load(std::memory_order_acquire) == eValid) {
                 static_cast<R*>(buf)->~R();
             }  
         }
@@ -74,29 +77,47 @@ private:
 public:
     template<typename Awaitable>
     TimeoutAwaiter(Awaitable&& awaitable, const std::chrono::time_point<Clock>& timeout)
-        : m_state{}, m_timeout{timeout} 
-    {
-        with_callback(
-            std::forward<Awaitable>(awaitable), 
-            [state = m_state](R&& value) {
-                new(state->buf) R(std::move(value));
+        : m_state{std::make_shared<State>()}, 
+        m_timeout{timeout}, 
+        m_future {             
+            [] (Awaitable a, std::shared_ptr<State> state) -> TrivialFuture { 
+                co_await std::suspend_always {}; // suspend here, resume in await_suspend
+                new(state->buf) R(co_await a);
                 int expected = State::ePending;
-                if (!state->state.compare_exchange_strong(
+                if (state->state.compare_exchange_strong(
                     expected, State::eValid, 
                     std::memory_order_acq_rel, std::memory_order_relaxed
-                )) 
-                    return;
-                if(state->caller) state->caller.resume();
-            }
-        );
+                )) {
+                    state->caller.resume();
+                }
+            } (std::move(awaitable), m_state)
+        }
+    {}
 
+    bool await_ready() {
+        if (Clock::now() >= m_timeout) [[unlikely]] {
+            m_state->state.store(State::eTimeout);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    void await_suspend(std::coroutine_handle<> h) {
+        m_state->caller = h;
+        m_future.get_coroutine().resume();
         get_running_timer<Clock>().add_task(
-            timeout,
+            m_timeout,
             [](void* a) {
                 auto& state = *static_cast<std::shared_ptr<State>*>(a);
-                if(state->state.load(std::memory_order_acquire) == State::ePending && state->caller) 
+                int expected = State::ePending;
+                if (state->state.compare_exchange_strong(
+                    expected, State::eTimeout, 
+                    std::memory_order_acq_rel, std::memory_order_relaxed
+                )) {
                     state->caller.resume();
-                delete &state;
+                }
+                delete static_cast<std::shared_ptr<State>*>(a);
             },
             new std::shared_ptr<State>{m_state},
             [](void* a) {
@@ -105,17 +126,10 @@ public:
         );
     }
 
-    bool await_ready() {
-        return Clock::now() >= m_timeout;
-    }
-
-    void await_suspend(std::coroutine_handle<> h) {
-        m_state->caller = h;
-    }
-
     std::optional<R> await_resume() {
         switch(m_state->state.load(std::memory_order_acquire)) {
-            case State::ePending: return std::nullopt;
+            case State::ePending: std::unreachable();
+            case State::eTimeout: return std::nullopt;
             case State::eValid: return std::move(*reinterpret_cast<R*>(m_state.buf));
         }
         std::unreachable();
@@ -124,6 +138,7 @@ public:
 private:
     std::shared_ptr<State> m_state;
     std::chrono::time_point<Clock> m_timeout;
+    TrivialFuture m_future;
 };
 
 template<typename Clock>
@@ -133,7 +148,8 @@ private:
     struct State {
         enum {
             ePending = 0,
-            eValid
+            eValid,
+            eTimeout
         };
         std::atomic_int state { ePending };
         std::coroutine_handle<> caller;
@@ -142,44 +158,58 @@ private:
 public:
     template<typename Awaitable>
     TimeoutAwaiter(Awaitable&& awaitable, const std::chrono::time_point<Clock>& timeout)
-        : m_state{std::make_shared<State>()}, m_timeout{timeout} 
-    {
-        with_callback(
-            std::move(awaitable), 
-            [state = m_state]() {
+        : m_state{std::make_shared<State>()}, 
+        m_timeout{timeout},
+        m_future { 
+            [] (Awaitable a, std::shared_ptr<State> state) -> TrivialFuture { 
+                co_await std::suspend_always {}; // suspend here, resume in await_suspend
+                co_await a;
                 int expected = State::ePending;
-                if (!state->state.compare_exchange_strong(
+                if (state->state.compare_exchange_strong(
                     expected, State::eValid, 
                     std::memory_order_acq_rel, std::memory_order_relaxed
-                )) 
-                    return;
-                if(state->caller) state->caller.resume();
-            }
-        );
-
-        get_running_timer<Clock>().add_task(
-            timeout,
-            [](void* a) {
-                auto& state = *static_cast<std::shared_ptr<State>*>(a);
-                if(state->state.load(std::memory_order_acquire) == State::ePending && state->caller) 
+                )) {
                     state->caller.resume();
-                delete &state;
-            },
-            new std::shared_ptr<State>{m_state}
-        );
-    }
+                }
+            } (std::move(awaitable), m_state)
+        }
+    {}
 
     bool await_ready() {
-        return Clock::now() >= m_timeout;
+        if (Clock::now() >= m_timeout) [[unlikely]] {
+            m_state->state.store(State::eTimeout);
+            return true;
+        } else {
+            return false;
+        }
     }
-
     void await_suspend(std::coroutine_handle<> h) {
         m_state->caller = h;
+        m_future.get_coroutine().resume();
+        get_running_timer<Clock>().add_task(
+            m_timeout,
+            [](void* a) {
+                auto& state = *static_cast<std::shared_ptr<State>*>(a);
+                int expected = State::ePending;
+                if (state->state.compare_exchange_strong(
+                    expected, State::eTimeout, 
+                    std::memory_order_acq_rel, std::memory_order_relaxed
+                )) {
+                    state->caller.resume();
+                }
+                delete static_cast<std::shared_ptr<State>*>(a);
+            },
+            new std::shared_ptr<State>{m_state},            
+            [](void* a) {
+                delete static_cast<std::shared_ptr<State>*>(a);
+            }
+        );
     }
 
     bool await_resume() {
         switch(m_state->state.load(std::memory_order_acquire)) {
-            case State::ePending: return false;
+            case State::ePending: std::unreachable();
+            case State::eTimeout: return false;
             case State::eValid: return true;
         }
         std::unreachable();
@@ -188,6 +218,7 @@ public:
 private:
     std::shared_ptr<State> m_state;
     std::chrono::time_point<Clock> m_timeout;
+    TrivialFuture m_future;
 };
 
 template<typename Awaiter, typename Clock, typename Dur>

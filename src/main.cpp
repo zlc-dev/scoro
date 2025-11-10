@@ -47,7 +47,7 @@ Future<int> test_success() {
 }
 
 Future<void> test_fail() {
-    if(co_await with_timeout(sleep_for(1000ms), 200ms)) {
+    if(co_await with_timeout([]()->Future<void> { throw std::runtime_error("error"); co_return; }(), 200ms)) {
         std::println("{}", 42);
     } else {
         throw std::runtime_error("timeout");
