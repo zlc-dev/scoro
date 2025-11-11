@@ -5,8 +5,10 @@
 #include <atomic>
 #include <chrono>
 #include <coroutine>
+#include <exception>
 #include <memory>
 #include <print>
+#include <type_traits>
 #include <utility>
 
 namespace coro {
@@ -52,27 +54,49 @@ TimerAwaiter<Clock> sleep_for(const std::chrono::duration<Rep, Period>& dur) {
     return TimerAwaiter<Clock> { Clock::now() + dur };
 }
 
-template<typename R, typename Clock>
-struct TimeoutAwaiter {
-private:
+namespace detail {
 
+    template<typename T>
     struct State {
         enum {
             ePending = 0,
             eValid,
+            eError,
             eTimeout
         };
 
-        alignas(alignof(R)) std::byte buf[sizeof(R)];
+        alignas(alignof(T)) std::byte buf[sizeof(T)];
+        std::exception_ptr exception { nullptr };
         std::atomic_int state { 0 };
-        std::coroutine_handle<> caller;
+        std::coroutine_handle<> caller { nullptr };
 
         ~State() {
             if (state.load(std::memory_order_acquire) == eValid) {
-                static_cast<R*>(buf)->~R();
+                reinterpret_cast<T*>(buf)->~T();
             }  
         }
     };
+
+    template<>
+    struct State<void> {
+        enum {
+            ePending = 0,
+            eValid,
+            eError,
+            eTimeout
+        };
+
+        std::exception_ptr exception { nullptr };
+        std::atomic_int state { 0 };
+        std::coroutine_handle<> caller { nullptr };
+    };
+
+} // namespace detail
+
+template<typename R, typename Clock>
+struct TimeoutAwaiter {
+private:
+    using State = detail::State<R>;
 
 public:
     template<typename Awaitable>
@@ -82,10 +106,21 @@ public:
         m_future {             
             [] (Awaitable a, std::shared_ptr<State> state) -> TrivialFuture { 
                 co_await std::suspend_always {}; // suspend here, resume in await_suspend
-                new(state->buf) R(co_await a);
+                int next_state = State::eValid;
+                try {
+                    if constexpr (std::is_same_v<R, void>) 
+                        co_await a;
+                    else {
+                        R r = co_await a;
+                        new(state->buf) R(std::move(r));
+                    }
+                } catch (...) {
+                    state->exception = std::current_exception();
+                    next_state = State::eError;
+                }
                 int expected = State::ePending;
                 if (state->state.compare_exchange_strong(
-                    expected, State::eValid, 
+                    expected, next_state, 
                     std::memory_order_acq_rel, std::memory_order_relaxed
                 )) {
                     state->caller.resume();
@@ -126,91 +161,20 @@ public:
         );
     }
 
-    std::optional<R> await_resume() {
+    auto await_resume() -> std::conditional_t<std::is_same_v<R, void>, bool, std::optional<R>> {
         switch(m_state->state.load(std::memory_order_acquire)) {
             case State::ePending: std::unreachable();
-            case State::eTimeout: return std::nullopt;
-            case State::eValid: return std::move(*reinterpret_cast<R*>(m_state.buf));
-        }
-        std::unreachable();
-    }
-
-private:
-    std::shared_ptr<State> m_state;
-    std::chrono::time_point<Clock> m_timeout;
-    TrivialFuture m_future;
-};
-
-template<typename Clock>
-struct TimeoutAwaiter<void, Clock> {
-private:
-
-    struct State {
-        enum {
-            ePending = 0,
-            eValid,
-            eTimeout
-        };
-        std::atomic_int state { ePending };
-        std::coroutine_handle<> caller;
-    };
-
-public:
-    template<typename Awaitable>
-    TimeoutAwaiter(Awaitable&& awaitable, const std::chrono::time_point<Clock>& timeout)
-        : m_state{std::make_shared<State>()}, 
-        m_timeout{timeout},
-        m_future { 
-            [] (Awaitable a, std::shared_ptr<State> state) -> TrivialFuture { 
-                co_await std::suspend_always {}; // suspend here, resume in await_suspend
-                co_await a;
-                int expected = State::ePending;
-                if (state->state.compare_exchange_strong(
-                    expected, State::eValid, 
-                    std::memory_order_acq_rel, std::memory_order_relaxed
-                )) {
-                    state->caller.resume();
-                }
-            } (std::move(awaitable), m_state)
-        }
-    {}
-
-    bool await_ready() {
-        if (Clock::now() >= m_timeout) [[unlikely]] {
-            m_state->state.store(State::eTimeout);
-            return true;
-        } else {
-            return false;
-        }
-    }
-    void await_suspend(std::coroutine_handle<> h) {
-        m_state->caller = h;
-        m_future.get_coroutine().resume();
-        get_running_timer<Clock>().add_task(
-            m_timeout,
-            [](void* a) {
-                auto& state = *static_cast<std::shared_ptr<State>*>(a);
-                int expected = State::ePending;
-                if (state->state.compare_exchange_strong(
-                    expected, State::eTimeout, 
-                    std::memory_order_acq_rel, std::memory_order_relaxed
-                )) {
-                    state->caller.resume();
-                }
-                delete static_cast<std::shared_ptr<State>*>(a);
-            },
-            new std::shared_ptr<State>{m_state},            
-            [](void* a) {
-                delete static_cast<std::shared_ptr<State>*>(a);
-            }
-        );
-    }
-
-    bool await_resume() {
-        switch(m_state->state.load(std::memory_order_acquire)) {
-            case State::ePending: std::unreachable();
-            case State::eTimeout: return false;
-            case State::eValid: return true;
+            case State::eTimeout:
+                if constexpr (std::is_same_v<R, void>)
+                    return false;
+                else
+                    return std::nullopt;
+            case State::eValid: 
+                if constexpr (std::is_same_v<R, void>)
+                    return true;
+                else
+                    return std::move(*reinterpret_cast<R*>(m_state->buf));
+            case State::eError: std::rethrow_exception(m_state->exception);
         }
         std::unreachable();
     }

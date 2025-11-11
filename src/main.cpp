@@ -4,6 +4,7 @@
 #include <coroutine>
 #include <exception>
 #include <print>
+#include <semaphore>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -47,7 +48,7 @@ Future<int> test_success() {
 }
 
 Future<void> test_fail() {
-    if(co_await with_timeout([]()->Future<void> { throw std::runtime_error("error"); co_return; }(), 200ms)) {
+    if(co_await with_timeout(sleep_for(1000ms), 200ms)) {
         std::println("{}", 42);
     } else {
         throw std::runtime_error("timeout");
@@ -70,9 +71,10 @@ void test_timeout() {
 }
 
 int main() {
-    test_timeout();
 
-    std::atomic_flag finish {};
+    test_timeout();
+    std::counting_semaphore<> sem{0};
+    int x = sizeof(sem);
     with_callback(
         test_success(),
         [](int x) { std::println("{}", x); },
@@ -85,13 +87,10 @@ int main() {
             }
         },
         [&]() {
-            finish.test_and_set();
-            finish.notify_all();
+            sem.release();
         }
     );
-    finish.wait(false);
 
-    finish.clear();
     with_callback(
         test_fail(),
         []() { std::println("???"); },
@@ -104,11 +103,12 @@ int main() {
             }
         },
         [&]() {
-            finish.test_and_set();
-            finish.notify_all();
+            sem.release();
         }
     );
-    finish.wait(false);
+
+    sem.acquire();
+    sem.acquire();
 
     return 0;
 }
