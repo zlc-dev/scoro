@@ -1,5 +1,6 @@
 #pragma once
 
+#include "scheduler.hpp"
 #include "timer.hpp"
 #include "coro.hpp"
 #include <atomic>
@@ -197,6 +198,49 @@ auto with_timeout(Awaiter&& awaiter, const std::chrono::time_point<Clock, Dur>& 
 template<typename Awaiter, typename Rep, typename Period>
 auto with_timeout(Awaiter&& awaiter, const std::chrono::duration<Rep, Period>& dur) {
     return with_timeout(std::forward<Awaiter>(awaiter), std::chrono::steady_clock::now() + dur);
+}
+
+struct SchedAwaiter {
+
+    bool await_ready() {
+        return false;
+    }
+
+    void await_suspend(std::coroutine_handle<> handle) {
+        if (!handle.done())
+            get_global_scheduler().submit(handle);
+    }
+
+    void await_resume() {}
+};
+
+inline SchedAwaiter sched() {
+    return {};
+}
+
+
+template<typename Promise>
+struct ThisCoroAwaiter {
+    bool await_ready() {
+        return false;
+    }
+
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) {
+        m_this = h;
+        return h;
+    }
+
+    std::coroutine_handle<Promise> await_resume() {
+        return m_this;
+    }
+
+private:
+    std::coroutine_handle<Promise> m_this { nullptr };
+};
+
+template<typename Promise = void>
+ThisCoroAwaiter<Promise> this_coroutine() {
+    return {};
 }
 
 } // namespace coro

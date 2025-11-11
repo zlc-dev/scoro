@@ -14,7 +14,11 @@ enable_testing()
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     add_executable(io_uring "${PROJECT_SOURCE_DIR}/test/test_io_uring.cpp" ${SOURCE} ${HEADER})
     target_include_directories(io_uring PRIVATE "${PROJECT_SOURCE_DIR}/include")
-    add_test(NAME test_io_uring COMMAND $<TARGET_FILE:io_uring> "${PROJECT_SOURCE_DIR}/tmp/test_io_uring")
+    add_test(
+        NAME test_io_uring 
+        COMMAND sh -c "mkdir -p ${PROJECT_SOURCE_DIR}/tmp/scoro_test_io_uring \
+        && $<TARGET_FILE:io_uring> ${PROJECT_SOURCE_DIR}/tmp/scoro_test_io_uring"
+    )
 endif(CMAKE_SYSTEM_NAME MATCHES "Linux")
 
 list(APPEND IN_FILES "${CMAKE_SOURCE_DIR}/.clangd.in")

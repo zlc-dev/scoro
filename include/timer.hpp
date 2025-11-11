@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <iostream>
 #include <mutex>
 #include <print>
 #include <queue>
@@ -42,7 +43,13 @@ public:
                 Task task = m_tasks.top();
                 m_tasks.pop();
                 locker.unlock();
-                task.callback(task.arg);
+                try {
+                    task.callback(task.arg);
+                } catch (const std::exception& e) {
+                    std::println(std::cerr, "unhandled exception: {}", e.what());
+                } catch (...) {
+                    std::println(std::cerr, "unhandled exception: unknown");
+                }
                 locker.lock();
             }
 

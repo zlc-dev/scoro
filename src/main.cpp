@@ -1,6 +1,5 @@
 #include "awaiter.hpp"
 #include "coro.hpp"
-#include <atomic>
 #include <coroutine>
 #include <exception>
 #include <print>
@@ -11,26 +10,6 @@
 
 using namespace std::chrono_literals;
 using namespace coro;
-
-
-template<typename Promise>
-struct ThisCoroutine {
-    bool await_ready() {
-        return false;
-    }
-
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) {
-        m_this = h;
-        return h;
-    }
-
-    std::coroutine_handle<Promise> await_resume() {
-        return m_this;
-    }
-
-private:
-    std::coroutine_handle<Promise> m_this;
-};
 
 Future<int> fib(int x) {
     if (x < 0) {
@@ -74,15 +53,13 @@ int main() {
 
     test_timeout();
     std::counting_semaphore<> sem{0};
-    int x = sizeof(sem);
     with_callback(
         test_success(),
         [](int x) { std::println("{}", x); },
         [](std::exception_ptr exception) {
             try { 
                 std::rethrow_exception(exception); 
-            }
-            catch (const std::exception& e) {
+            } catch (const std::exception& e) {
                 std::println(std::cerr, "error: {}", e.what());
             }
         },
@@ -97,8 +74,7 @@ int main() {
         [](std::exception_ptr exception) {
             try { 
                 std::rethrow_exception(exception); 
-            }
-            catch (const std::exception& e) {
+            } catch (const std::exception& e) {
                 std::println(std::cerr, "error: {}", e.what());
             }
         },
