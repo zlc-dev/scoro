@@ -1,6 +1,6 @@
-#include "awaiter.hpp"
 #include "coro.hpp"
-#include <coroutine>
+#include "scheduler.hpp"
+#include "timer.hpp"
 #include <exception>
 #include <print>
 #include <semaphore>
@@ -22,12 +22,13 @@ Future<int> fib(int x) {
 }
 
 Future<int> test_success() {
-    co_await sleep_for(500ms);
+    co_await get_global_timer().sleep_for(500ms);
     co_return 42;
 }
 
 Future<void> test_fail() {
-    if(co_await with_timeout(sleep_for(1000ms), 200ms)) {
+    if(co_await get_global_timer().with_timeout_for(get_global_timer().sleep_for(1000ms), 200ms)) {
+        co_await get_global_scheduler().sched();
         std::println("{}", 42);
     } else {
         throw std::runtime_error("timeout");

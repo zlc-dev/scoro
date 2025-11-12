@@ -49,14 +49,17 @@ private:
         std::unique_lock<std::mutex> locker { m_mutex };
         while (!m_stop.load(std::memory_order_acquire)) {
             while (!m_tasks.empty()) {
+                std::coroutine_handle<> task = m_tasks.front();
+                m_tasks.pop();
+                locker.unlock();
                 try {
-                    m_tasks.front().resume();
+                    task.resume();
                 } catch (const std::exception& e) {
                     std::println(std::cerr, "unhandled exception: {}", e.what());
                 } catch (...) {
-                    std::println(std::cerr, "unhandled exception: unknown");
+                    std::println(std::cerr, "unhandled unknown exception");
                 }
-                m_tasks.pop();
+                locker.lock();
             }
             m_cv.wait(locker);
         }
@@ -70,8 +73,37 @@ private:
     std::thread m_worker;
 };
 
-inline LooperScheduler& get_global_scheduler() {
-    static LooperScheduler instance {};
+template<typename Scheduler>
+class SchedulerWrapper: public Scheduler {
+private:
+    
+    struct SchedAwaiter {
+        bool await_ready() {
+            return false;
+        }
+
+        void await_suspend(std::coroutine_handle<> handle) {
+            if (!handle.done())
+                m_scheduler.submit(handle);
+        }
+
+        void await_resume() {}
+
+        SchedulerWrapper<Scheduler>& m_scheduler;
+    };
+
+public:
+    using Scheduler::Scheduler;
+
+    SchedAwaiter sched() {
+        return SchedAwaiter { *this };
+    }
+
+};
+
+
+inline SchedulerWrapper<LooperScheduler>& get_global_scheduler() {
+    static SchedulerWrapper<LooperScheduler> instance {};
     return instance;
 }
 

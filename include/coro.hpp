@@ -26,7 +26,7 @@ public:
         } catch (const std::exception& e) { 
             std::println(std::cerr, "unhandled exception: {}", e.what()); 
         } catch (...) {
-            std::println(std::cerr, "unhandled exception");
+            std::println(std::cerr, "unhandled unknown exception");
         }
     }
     inline void return_void() {}
