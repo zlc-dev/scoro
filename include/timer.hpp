@@ -6,10 +6,13 @@
 #include <coroutine>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <print>
 #include <queue>
+#include <type_traits>
 #include <vector>
 #include "coro.hpp"
+#include "scheduler.hpp"
 
 using callback_t = void(*)(void* arg);
 
@@ -184,6 +187,8 @@ class TimerWrapper: public Timer {
         using Clock = typename Timer::Clock;
 
     public:
+        using return_type = std::conditional_t<std::is_same_v<R, void>, bool, std::optional<R>>;
+
         template<typename Awaitable>
         TimeoutAwaiter(Awaitable&& awaitable, const std::chrono::time_point<Clock>& timeout, TimerWrapper<Timer>& timer)
             : m_state{std::make_shared<State>()}, 
@@ -247,7 +252,7 @@ class TimerWrapper: public Timer {
             );
         }
 
-        auto await_resume() -> std::conditional_t<std::is_same_v<R, void>, bool, std::optional<R>> {
+        return_type await_resume() {
             switch(m_state->state.load(std::memory_order_acquire)) {
                 case State::ePending: std::unreachable();
                 case State::eTimeout:
@@ -272,6 +277,9 @@ class TimerWrapper: public Timer {
         TimerWrapper<Timer>& m_timer;
     };
 
+    template<typename Awaitable>
+    using TimeoutFuture = Future<typename TimeoutAwaiter<decltype(std::declval<Awaitable>().await_resume())>::return_type>;
+
 public:
     using Clock = typename Timer::Clock;
     using Timer::Timer;
@@ -285,15 +293,17 @@ public:
         return sleep_until(Clock::now() + dur);
     }
 
-    template<typename Awaitable>
-    auto with_timeout_until(Awaitable&& awaitable, const std::chrono::time_point<Clock>& timeout) {
-        using R = decltype(std::declval<Awaitable>().await_resume());
-        return TimeoutAwaiter<R> { std::move(awaitable), timeout, *this };
+    template<typename Scheduler = TrivialScheduler, typename Awaitable>
+    TimeoutFuture<Awaitable> with_timeout_until(Awaitable&& awaitable, const std::chrono::time_point<Clock>& timeout) {
+        using Ret = decltype(std::declval<Awaitable>().await_resume());
+        auto r = co_await TimeoutAwaiter<Ret> { std::move(awaitable), timeout, *this };
+        co_await sched<Scheduler>();
+        co_return std::move(r);
     }
 
-    template<typename Awaitable, typename Rep, typename Period>
+    template<typename Scheduler = TrivialScheduler, typename Awaitable, typename Rep, typename Period>
     auto with_timeout_for(Awaitable&& awaitable, const std::chrono::duration<Rep, Period>& duration) {
-        return with_timeout_until(std::move(awaitable), Clock::now() + duration);
+        return with_timeout_until<Scheduler>(std::move(awaitable), Clock::now() + duration);
     }
 
 };

@@ -1,5 +1,5 @@
 #include "coro.hpp"
-#include "scheduler.hpp"
+#include "looper.hpp"
 #include "timer.hpp"
 #include <exception>
 #include <print>
@@ -27,8 +27,7 @@ Future<int> test_success() {
 }
 
 Future<void> test_fail() {
-    if(co_await get_global_timer().with_timeout_for(get_global_timer().sleep_for(1000ms), 200ms)) {
-        co_await get_global_scheduler().sched();
+    if(co_await get_global_timer().with_timeout_for<LooperScheduler>(get_global_timer().sleep_for(1000ms), 200ms)) {
         std::println("{}", 42);
     } else {
         throw std::runtime_error("timeout");

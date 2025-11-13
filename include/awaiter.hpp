@@ -1,15 +1,6 @@
 #pragma once
 
-#include "scheduler.hpp"
-#include "coro.hpp"
-#include <atomic>
-#include <chrono>
 #include <coroutine>
-#include <exception>
-#include <memory>
-#include <print>
-#include <type_traits>
-#include <utility>
 
 namespace coro {
 

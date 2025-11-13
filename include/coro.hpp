@@ -3,8 +3,10 @@
 #include "waitable_atomic.hpp"
 #include <atomic>
 #include <cassert>
+#include <concepts>
 #include <coroutine>
 #include <exception>
+#include <future>
 #include <iostream>
 #include <optional>
 #include <print>
@@ -12,6 +14,27 @@
 #include <utility>
 
 namespace coro {
+
+namespace concepts {
+
+namespace detail {
+
+    template<typename T>
+    concept await_suspend_result = 
+        std::same_as<T, void> 
+        || std::same_as<T, bool> 
+        || std::convertible_to<T, std::coroutine_handle<>>;
+
+} // namespace detail
+
+template<typename Promise, typename T>
+concept awaitable = requires (T t, std::coroutine_handle<Promise> h) {
+    { t.await_ready() } -> std::convertible_to<bool>;
+    { t.await_suspend(h) } -> detail::await_suspend_result;
+    t.await_resume();
+};
+
+} // namespace concepts
 
 // No ownership, no return values, no exception storage.
 struct TrivialPromise {
