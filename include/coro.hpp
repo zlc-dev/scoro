@@ -5,11 +5,13 @@
 #include <cassert>
 #include <concepts>
 #include <coroutine>
+#include <cstddef>
 #include <exception>
 #include <future>
 #include <iostream>
 #include <optional>
 #include <print>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -27,7 +29,7 @@ namespace detail {
 
 } // namespace detail
 
-template<typename Promise, typename T>
+template<typename T, typename Promise>
 concept awaitable = requires (T t, std::coroutine_handle<Promise> h) {
     { t.await_ready() } -> std::convertible_to<bool>;
     { t.await_suspend(h) } -> detail::await_suspend_result;
@@ -122,8 +124,8 @@ public:
 
     struct FinalWaiter {
         inline bool await_ready() noexcept { return false; }
-        template<typename T>
-        inline std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise<T>> h) noexcept {
+        template<typename Promise>
+        inline std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept {
             std::coroutine_handle<> ret = h.promise().get_caller() ? h.promise().get_caller() : std::noop_coroutine();
             return ret;
         }
@@ -131,7 +133,6 @@ public:
     };
 
 public:
-    inline PromiseBase() noexcept {}
 
     inline InitialWaiter initial_suspend() noexcept { return {}; }
     inline FinalWaiter final_suspend() noexcept { return {}; }
@@ -244,8 +245,8 @@ public:
 
     struct FinalWaiter {
         inline bool await_ready() noexcept { return false; }
-        template<typename T>
-        inline std::coroutine_handle<> await_suspend(std::coroutine_handle<WaitablePromise<T>> h) noexcept {
+        template<typename Promise>
+        inline std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept {
             h.promise().set_valid();
             std::coroutine_handle<> ret = h.promise().get_caller() ? h.promise().get_caller() : std::noop_coroutine();
             return ret;
@@ -421,13 +422,141 @@ public:
         return { std::exchange(m_coroutine, nullptr) };
     }
 
-private:
+protected:
     std::coroutine_handle<promise_type> m_coroutine;
 };
 
 template<typename Awaitable, typename R = decltype(std::declval<Awaitable>().await_resume())>
 WaitableFuture<R> make_waitable(Awaitable awaitable) {
     co_return co_await awaitable;
+}
+
+namespace concepts {
+template<typename Promise>
+concept cancelable_promise = requires (Promise p, std::coroutine_handle<> h) {
+    { p.get_canceled() } -> std::same_as<bool>;
+    { p.set_waiter(h) } -> std::same_as<bool>;
+};
+} // namespace concepts
+
+template<typename Promise>
+struct CancelablePromiseBase {
+public:
+
+    void cancel() {
+        int expected_state = m_state.load(std::memory_order_acquire);
+        for(;;) {
+            switch (expected_state) {
+                case ePending: 
+                    if (m_state.compare_exchange_strong(expected_state, eCanceled, 
+                        std::memory_order_acq_rel, std::memory_order_relaxed)) 
+                    {
+                        return;
+                    }
+                    break;
+                case eCanceled:
+                    return;
+                case eWaiting:
+                    if (m_state.compare_exchange_strong(expected_state, eCanceled, 
+                        std::memory_order_acq_rel, std::memory_order_relaxed)) 
+                    {
+                        m_waiter.resume();
+                        return;
+                    }
+                    break;
+                default:
+                    std::unreachable();
+            }
+        }
+    }
+
+    bool set_waiter(std::coroutine_handle<> waiter) {
+        m_waiter = waiter;
+        int expected_state = ePending;
+        return m_state.compare_exchange_strong(
+            expected_state, eWaiting, 
+            std::memory_order_acq_rel, std::memory_order_relaxed);
+    }
+
+    bool get_canceled() {
+        return m_state.load(std::memory_order_acquire) == eCanceled;
+    }
+
+protected:
+    enum CancelState {
+        ePending,
+        eCanceled,
+        eWaiting
+    };
+
+    std::atomic_int m_state { ePending };
+    std::coroutine_handle<> m_waiter { nullptr };
+};
+
+template<typename T>
+struct CancelablePromise: public Promise<T>, public CancelablePromiseBase<CancelablePromise<T>> {
+public:
+    using Promise<T>::Promise;
+};
+
+template<typename T>
+struct CancelableFuture: public Future<T> {
+    using promise_type = CancelablePromise<T>;
+    using Future<T>::Future;
+
+    void cancel() {
+        std::coroutine_handle<promise_type> handle = 
+            std::coroutine_handle<promise_type>::from_address(Future<T>::m_coroutine.address());
+        promise_type& promise = handle.promise();
+        promise.cancel();
+    }
+};
+
+
+template<typename T>
+struct CancelableWaitablePromise: public WaitablePromise<T>, public CancelablePromiseBase<CancelableWaitablePromise<T>> {
+public:
+    using WaitablePromise<T>::WaitablePromise;
+};
+
+
+template<typename T>
+struct CancelableWaitableFuture: public WaitableFuture<T> {
+    using promise_type = CancelableWaitablePromise<T>;
+    using WaitableFuture<T>::WaitableFuture;
+
+    void cancel() {
+        std::coroutine_handle<promise_type> handle = 
+            std::coroutine_handle<promise_type>::from_address(WaitableFuture<T>::m_coroutine.address());
+        promise_type& promise = handle.promise();
+        promise.cancel();
+    }
+};
+
+
+template<concepts::cancelable_promise Promise>
+struct CancelAwaiter {
+
+    CancelAwaiter(std::coroutine_handle<Promise> handle)
+        : m_handle(handle) {}
+
+    bool await_ready() {
+        return m_handle.promise().get_canceled();
+    }
+
+    bool await_suspend(std::coroutine_handle<> handle) {
+        return m_handle.promise().set_waiter(handle);
+    }
+
+    void await_resume() {}
+
+private:
+    std::coroutine_handle<Promise> m_handle;
+};
+
+template<concepts::cancelable_promise Promise>
+inline CancelAwaiter<Promise> canceled(std::coroutine_handle<Promise> handle) {
+    return { handle };
 }
 
 } // namespace coro

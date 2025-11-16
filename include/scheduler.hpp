@@ -1,22 +1,16 @@
 #pragma once
 
-#include <atomic>
 #include <coroutine>
-#include <exception>
-#include <iostream>
 #include <print>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <thread>
 
 namespace coro {
 
-template<typename T>
-concept is_scheduler = requires () {
-    T{}.submit(std::coroutine_handle<> {});
-};
-
+namespace concepts {
+    template<typename T>
+    concept scheduler = requires () {
+        T{}.submit(std::coroutine_handle<> {});
+    };
+}
 
 class TrivialScheduler {
 public:
@@ -25,9 +19,9 @@ public:
     }
 };
 
-static_assert(is_scheduler<TrivialScheduler>);
+static_assert(concepts::scheduler<TrivialScheduler>);
 
-template<is_scheduler Scheduler>
+template<concepts::scheduler Scheduler>
 struct SchedAwaiter {
     bool await_ready() {
         return false;
@@ -41,7 +35,7 @@ struct SchedAwaiter {
     void await_resume() {}
 };
 
-template<is_scheduler Scheduler = TrivialScheduler>
+template<concepts::scheduler Scheduler = TrivialScheduler>
 inline SchedAwaiter<Scheduler> sched() {
     return {};
 }

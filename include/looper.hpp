@@ -2,6 +2,12 @@
 
 #include "scheduler.hpp"
 #include <coroutine>
+#include <print>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <queue>
+#include <iostream>
 
 namespace coro {
 
@@ -46,6 +52,7 @@ private:
                 m_tasks.pop();
                 locker.unlock();
                 try {
+                    std::println("resume a task");
                     task.resume();
                 } catch (const std::exception& e) {
                     std::println(std::cerr, "unhandled exception: {}", e.what());
@@ -80,5 +87,7 @@ public:
     }
 
 };
+
+static_assert(concepts::scheduler<LooperScheduler>);
 
 }

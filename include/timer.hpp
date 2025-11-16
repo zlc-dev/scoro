@@ -22,7 +22,7 @@ public:
     using Clock = Clk;
 
     struct Task {
-        std::chrono::time_point<Clk> expire_time;
+        std::chrono::time_point<Clk> execute_time;
         callback_t callback;
         void* arg;
         callback_t cancel;
@@ -46,7 +46,7 @@ public:
     void run() {
         std::unique_lock<std::mutex> locker { m_mutex };
         while (!m_stop.load(std::memory_order_acquire)) {
-            while (!m_tasks.empty() && m_tasks.top().expire_time <= Clk::now()) {
+            while (!m_tasks.empty() && m_tasks.top().execute_time <= Clk::now()) {
                 Task task = m_tasks.top();
                 m_tasks.pop();
                 locker.unlock();
@@ -55,15 +55,15 @@ public:
                 } catch (const std::exception& e) {
                     std::println(std::cerr, "unhandled exception: {}", e.what());
                 } catch (...) {
-                    std::println(std::cerr, "unhandled exception: unknown");
+                    std::println(std::cerr, "unhandled unknown exception");
                 }
                 locker.lock();
             }
 
             if (m_tasks.empty()) {
                 m_cv.wait(locker);
-            } else if (m_tasks.top().expire_time > Clk::now()) {
-                m_cv.wait_until(locker, m_tasks.top().expire_time);
+            } else if (m_tasks.top().execute_time > Clk::now()) {
+                m_cv.wait_until(locker, m_tasks.top().execute_time - std::chrono::milliseconds(1));
             }
         }
     }
@@ -82,7 +82,7 @@ private:
 
     struct TaskCompare {
         bool operator()(const Task& lhs, const Task& rhs) const noexcept {
-            return lhs.expire_time > rhs.expire_time;
+            return lhs.execute_time > rhs.execute_time;
         }
     };
 

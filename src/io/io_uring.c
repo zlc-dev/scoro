@@ -1,4 +1,5 @@
 #include "io/io_uring.h"
+#include <bits/types/sigset_t.h>
 #include <linux/io_uring.h>
 #include <sched.h>
 #include <stdio.h>
@@ -46,10 +47,11 @@ static int sys_io_uring_setup(unsigned entries, struct io_uring_params *p)
 }
 
 static int sys_io_uring_enter(int ring_fd, unsigned int to_submit,
-                    unsigned int min_complete, unsigned int flags)
+                    unsigned int min_complete, unsigned int flags,
+                    sigset_t *sigset)
 {
     int ret = syscall(__NR_io_uring_enter, ring_fd, to_submit,
-                    min_complete, flags, NULL, 0);
+                    min_complete, flags, sigset, 0);
     return (ret < 0) ? -errno : ret;
 }
 
@@ -122,7 +124,7 @@ int io_uring_service_submit(struct io_uring_service *service, int fd, int op, vo
 
     if (service->mode == IORING_MODE_SQPOLL) {
         while ((tail - smp_load_acquire(service->sring_head)) >= service->sq_entries) {
-            sys_io_uring_enter(service->ring_fd, 1, 0, IORING_ENTER_SQ_WAKEUP | IORING_ENTER_SQ_WAIT);
+            sys_io_uring_enter(service->ring_fd, 1, 0, IORING_ENTER_SQ_WAKEUP | IORING_ENTER_SQ_WAIT, NULL);
         }
     } else {
         if (tail - smp_load_acquire(service->sring_head) >= service->sq_entries) {
@@ -149,7 +151,7 @@ int io_uring_service_submit(struct io_uring_service *service, int fd, int op, vo
     smp_store_release(service->sring_tail, tail + 1);
 
     if (service->mode != IORING_MODE_SQPOLL) {
-        return sys_io_uring_enter(service->ring_fd, 1, 0, 0);
+        return sys_io_uring_enter(service->ring_fd, 1, 0, 0, NULL);
     }
     return 0;
 }
@@ -167,7 +169,7 @@ void io_uring_service_start(struct io_uring_service *service) {
                 if (head != smp_load_acquire(service->cring_tail))
                     break;
             }
-            sys_io_uring_enter(service->ring_fd, 0, 1, IORING_ENTER_GETEVENTS | IORING_ENTER_SQ_WAKEUP);
+            sys_io_uring_enter(service->ring_fd, 0, 1, IORING_ENTER_GETEVENTS | IORING_ENTER_SQ_WAKEUP, NULL);
             continue;
         }
 
@@ -200,7 +202,7 @@ void io_uring_service_stop(struct io_uring_service *service) {
     service->sring_array[index] = index;
     smp_store_release(service->sring_tail, tail + 1);
 
-    sys_io_uring_enter(service->ring_fd, 1, 0, IORING_ENTER_GETEVENTS);
+    sys_io_uring_enter(service->ring_fd, 1, 0, IORING_ENTER_GETEVENTS, NULL);
 }
 
 void io_uring_service_finish(struct io_uring_service *service) {

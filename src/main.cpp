@@ -1,6 +1,9 @@
+#include "awaiter.hpp"
 #include "coro.hpp"
 #include "looper.hpp"
 #include "timer.hpp"
+#include <chrono>
+#include <coroutine>
 #include <exception>
 #include <print>
 #include <semaphore>
@@ -27,7 +30,7 @@ Future<int> test_success() {
 }
 
 Future<void> test_fail() {
-    if(co_await get_global_timer().with_timeout_for<LooperScheduler>(get_global_timer().sleep_for(1000ms), 200ms)) {
+    if(co_await get_global_timer().with_timeout_for(get_global_timer().sleep_for(1000ms), 200ms)) {
         std::println("{}", 42);
     } else {
         throw std::runtime_error("timeout");
@@ -49,7 +52,49 @@ void test_timeout() {
     }
 }
 
+CancelableFuture<void> test_cancel() {
+    using promise_type = CancelableFuture<void>::promise_type;
+    auto self = co_await this_coroutine<promise_type>();
+    auto [idx, res] = co_await wait_any(
+        get_global_timer().sleep_for(1s), 
+        canceled(self)
+    );
+    if (idx == 1) {
+        std::println("canceled");
+    }
+}
+
+WaitableFuture<void> test_cancel2() {
+    auto cancelable = test_cancel();
+    auto [idx, res] = co_await wait_any(
+        get_global_timer().sleep_for(500ms), 
+        cancelable
+    );
+    if (idx != 1) {
+        cancelable.cancel();
+    }
+}
+
+WaitableFuture<void> test_waitall() {
+    auto t0 = std::chrono::steady_clock::now();
+    auto [r0, r1, r2] = co_await wait_all(
+        get_global_timer().sleep_for(100ms), 
+        get_global_timer().sleep_for(200ms),
+        fib(8)
+    );
+    std::println("{}", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0));
+    if (r2) {
+        std::println("{}", r2.value());
+    }
+}
+
 int main() {
+
+    auto t1 = test_cancel2();
+    t1.wait();
+
+    auto t2 = test_waitall();
+    t2.wait();
 
     test_timeout();
     std::counting_semaphore<> sem{0};
