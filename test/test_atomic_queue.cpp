@@ -7,14 +7,18 @@
 #include "container/queue.hpp"
 
 const size_t N_THREAD = 100;
-const size_t N_LOOP = 10000;
+const size_t N_LOOP = 100000;
 
 bool arr[N_THREAD][N_LOOP];
+
+struct Test {
+    int x, y;
+};
 
 int main() {
 
     std::vector<std::thread> ths;
-    AtomicQueue<std::pair<int, int>> que;
+    AtomicQueue<Test> que;
 
     for(int i = 0; i < N_THREAD; ++i) {
         ths.emplace_back([&, i]() {
