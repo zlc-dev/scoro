@@ -435,7 +435,7 @@ namespace concepts {
 template<typename Promise>
 concept cancelable_promise = requires (Promise p, std::coroutine_handle<> h) {
     { p.get_canceled() } -> std::same_as<bool>;
-    { p.set_waiter(h) } -> std::same_as<bool>;
+    { p.set_cancel_waiter(h) } -> std::same_as<bool>;
 };
 } // namespace concepts
 
@@ -470,7 +470,7 @@ public:
         }
     }
 
-    bool set_waiter(std::coroutine_handle<> waiter) {
+    bool set_cancel_waiter(std::coroutine_handle<> waiter) {
         m_waiter = waiter;
         int expected_state = ePending;
         return m_state.compare_exchange_strong(
@@ -545,7 +545,7 @@ struct CancelAwaiter {
     }
 
     bool await_suspend(std::coroutine_handle<> handle) {
-        return m_handle.promise().set_waiter(handle);
+        return m_handle.promise().set_cancel_waiter(handle);
     }
 
     void await_resume() {}

@@ -11,6 +11,14 @@ target_include_directories(coroutine PRIVATE "${PROJECT_SOURCE_DIR}/include")
 
 enable_testing()
 
+add_executable(test_atomic_queue "${PROJECT_SOURCE_DIR}/test/test_atomic_queue.cpp" ${SOURCE} ${HEADER})
+target_include_directories(test_atomic_queue PRIVATE "${PROJECT_SOURCE_DIR}/include")
+target_link_libraries(test_atomic_queue PRIVATE atomic)
+add_test(
+    NAME test_atomic_queue
+    COMMAND $<TARGET_FILE:test_atomic_queue>
+)
+
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     add_executable(io_uring "${PROJECT_SOURCE_DIR}/test/test_io_uring.cpp" ${SOURCE} ${HEADER})
     target_include_directories(io_uring PRIVATE "${PROJECT_SOURCE_DIR}/include")

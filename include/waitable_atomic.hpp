@@ -9,15 +9,24 @@
 #include <unistd.h>
 #include <errno.h>
 
+constexpr unsigned SPIN_TIMES = 1000;
+
 #elif defined(_WIN32)
 #pragma comment(lib, "Synchronization.lib")
 #include <windows.h>
 #include <synchapi.h>
 
+constexpr unsigned SPIN_TIMES = 1000;
+
 #else
 #include <condition_variable>
 #include <mutex>
+
+constexpr unsigned SPIN_TIMES = 1;
 #endif
+
+
+static_assert(SPIN_TIMES > 0, "spin times must > 0");
 
 class waitable_atomic_int: public std::atomic_int {
 public:
@@ -25,20 +34,28 @@ public:
         : std::atomic_int(init) {}
 
     inline void wait(int expected, std::memory_order memory_order = std::memory_order_seq_cst) const noexcept {
+        unsigned spins = SPIN_TIMES;
         while (load(memory_order) == expected) {
+            if (--spins != 0) continue;
             wait_impl(expected);
         }
     }
 
-    template <typename Rep, typename Period>
+    template <typename Clock = std::chrono::steady_clock, typename Rep, typename Period>
     bool wait_for(
         int expected,
         const std::chrono::duration<Rep, Period>& dur,
         std::memory_order memory_order = std::memory_order_seq_cst
     ) const noexcept {
         auto success = false;
+        auto before_spin = Clock::now();
+        unsigned spins = SPIN_TIMES;
         while (load(memory_order) == expected) {
-            success = wait_for_impl(expected, dur);
+            if (--spins != 0) continue;
+            auto spin_dur = Clock::now() - before_spin;
+            if (spin_dur >= dur)
+                return false;
+            success = wait_for_impl(expected, dur - spin_dur);
             if (!success)
                 return false;
         }
@@ -52,7 +69,12 @@ public:
         std::memory_order memory_order = std::memory_order_seq_cst
     ) const noexcept {
         auto success = false;
+        unsigned spins = SPIN_TIMES;
+
         while (load(memory_order) == expected) {
+            if (--spins != 0) continue;
+            if (Clock::now() >= atime)
+                return false;
             success = wait_until_impl(expected, atime);
             if (!success)
                 return false;
@@ -153,7 +175,7 @@ private:
 
 #else
 
-    // fallback：条件变量版本（非高性能
+    // fallback：条件变量版本
 
     inline void wait_impl(int expected) const noexcept {
         std::unique_lock<std::mutex> lk(mtx);

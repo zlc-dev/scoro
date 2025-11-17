@@ -1,9 +1,9 @@
 #include "awaiter.hpp"
 #include "coro.hpp"
-#include "looper.hpp"
 #include "timer.hpp"
 #include <chrono>
 #include <coroutine>
+#include <cstddef>
 #include <exception>
 #include <print>
 #include <semaphore>
@@ -56,7 +56,7 @@ CancelableFuture<void> test_cancel() {
     using promise_type = CancelableFuture<void>::promise_type;
     auto self = co_await this_coroutine<promise_type>();
     auto [idx, res] = co_await wait_any(
-        get_global_timer().sleep_for(1s), 
+        get_global_timer().sleep_for(1s),
         canceled(self)
     );
     if (idx == 1) {
@@ -67,7 +67,7 @@ CancelableFuture<void> test_cancel() {
 WaitableFuture<void> test_cancel2() {
     auto cancelable = test_cancel();
     auto [idx, res] = co_await wait_any(
-        get_global_timer().sleep_for(500ms), 
+        get_global_timer().sleep_for(500ms),
         cancelable
     );
     if (idx != 1) {
@@ -78,7 +78,7 @@ WaitableFuture<void> test_cancel2() {
 WaitableFuture<void> test_waitall() {
     auto t0 = std::chrono::steady_clock::now();
     auto [r0, r1, r2] = co_await wait_all(
-        get_global_timer().sleep_for(100ms), 
+        get_global_timer().sleep_for(100ms),
         get_global_timer().sleep_for(200ms),
         fib(8)
     );
@@ -86,14 +86,12 @@ WaitableFuture<void> test_waitall() {
     if (r2) {
         std::println("{}", r2.value());
     }
-}
+} 
 
 int main() {
-
     auto t1 = test_cancel2();
-    t1.wait();
-
     auto t2 = test_waitall();
+    t1.wait();
     t2.wait();
 
     test_timeout();
