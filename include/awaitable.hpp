@@ -5,6 +5,7 @@
 #include "meta.hpp"
 #include "expected.hpp"
 #include <atomic>
+#include <concepts>
 #include <coroutine>
 #include <cstddef>
 #include <exception>
@@ -51,7 +52,7 @@ struct ThisPromiseAwaitable {
     }
 
     bool await_suspend(std::coroutine_handle<Promise> h) {
-        m_this = &h.promise();
+        m_this = static_cast<Promise*>(&h.promise());
         return false;
     }
 

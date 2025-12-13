@@ -7,6 +7,7 @@
 #include "sync.hpp"
 #include "timer.hpp"
 #include <chrono>
+#include <concepts>
 #include <coroutine>
 #include <exception>
 #include <future>
@@ -108,13 +109,9 @@ CancelableWaitableFuture<void> test_cancel() {
     co_await sched<LooperScheduler>();
     auto& promise = co_await this_promise<CancelableWaitableFuture<void>::promise_type>();
     auto cancel_waiter = promise.wait_cancel();
-    if (!cancel_waiter) {
-        std::println("canceled");
-        co_return;
-    }
-    auto [idx, res] = co_await wait_any(std::move(cancel_waiter.value()), std::suspend_always {});
+    auto [idx, res] = co_await wait_any(std::move(cancel_waiter), std::suspend_always {});
     if (idx == 0) {
-        std::println("canceled");
+        std::println("test_cancel: canceled");
     }
     co_return;
 }
@@ -122,25 +119,22 @@ CancelableWaitableFuture<void> test_cancel() {
 
 CancelableWaitableFuture<void> test_wait_each() {
     auto& promise = co_await this_promise<CancelableWaitableFuture<void>::promise_type>();
-    auto cancel_waiter = promise.wait_cancel();
-    if (!cancel_waiter) {
-        std::println("canceled");
-        co_return;
-    }
     auto cancelable_task = test_cancel().detach();
-    auto tasks = wait_each(get_global_timer().sleep_for(500ms), cancelable_task, std::move(cancel_waiter.value()));
+    co_await get_global_timer().with_timeout_for(promise.wait_cancel(), 100ms);
+    auto tasks = wait_each(get_global_timer().sleep_for(500ms), cancelable_task, promise.wait_cancel());
     auto start = std::chrono::steady_clock::now();
-    for(int i = 0; i < 2; ++i) {
+    for(int i = 0; i < 2; ) {
         auto ret = co_await tasks;
         auto [idx, res] = std::move(ret.value());
         if (idx == 0) {
             std::println("500ms");
+            ++i;
         } else if (idx == 1) {
             std::println("task");
+            ++i;
         } else if (idx == 2) {
-            std::println("cacneled");
+            std::println("test_wait_each: cacneled");
             cancelable_task.cancel();
-            --i;
         }
     }
     auto end = std::chrono::steady_clock::now();
@@ -155,7 +149,7 @@ Future<void> test_rw() {
     while(ch != 'q') {
         auto [idx, res] = co_await wait_any(
             service.read(STDIN_FILENO, &ch, 1, 0),
-            get_global_timer().sleep_for(5s)
+            get_global_timer().sleep_for(3s)
         );
         if (idx == 1) {
             co_await service.nop(); // to wake service
@@ -175,6 +169,7 @@ int main() {
     service.run(test_rw());
 
     auto t0 = test_wait_each();
+    t0.wait_for(1s);
     t0.cancel();
     t0.wait();
     t0.get();

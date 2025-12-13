@@ -482,30 +482,15 @@ struct CancelablePromiseBase {
 public:
 
     inline void cancel() noexcept {
-        int expected_state = m_state.load(std::memory_order_acquire);
-        for(;;) {
-            switch (expected_state) {
-                case eUnused:
-                case ePending: 
-                    if (m_state.compare_exchange_strong(expected_state, eCanceled, 
-                        std::memory_order_acq_rel, std::memory_order_relaxed)) 
-                    {
-                        return;
-                    }
-                    break;
-                case eCanceled:
-                    return;
-                case eWaiting:
-                    if (m_state.compare_exchange_strong(expected_state, eCanceled, 
-                        std::memory_order_acq_rel, std::memory_order_relaxed)) 
-                    {
-                        m_waiter.resume();
-                        return;
-                    }
-                    break;
-                default:
-                    return;
-            }
+        switch (m_state.exchange(eCanceled, std::memory_order_acq_rel)) {
+            case ePending:
+            case eCanceled:
+                break;
+            case eWaiting:
+                m_waiter.resume();
+                break;
+            default:
+                break;
         }
     }
 
@@ -530,17 +515,9 @@ public:
         private:
             CancelablePromiseBase& m_promise;
         };
-        int state = eUnused;
-        if(!m_state.compare_exchange_strong(state, ePending, 
-            std::memory_order_acq_rel, std::memory_order_relaxed)
-        ) {
-            if (state == eCanceled) {
-                return std::optional<CancelAwaitable>{std::nullopt};
-            } else {
-                throw std::runtime_error("Repeated wait for cancellation");
-            }
-        }
-        return std::optional<CancelAwaitable>{ CancelAwaitable{ *this } };
+        std::coroutine_handle<> old_waiter = reset_waiter();
+        if (old_waiter) old_waiter.resume();
+        return CancelAwaitable{ *this };
     }
 
 private:
@@ -553,18 +530,27 @@ private:
             std::memory_order_acq_rel, std::memory_order_relaxed);
     }
 
+    inline std::coroutine_handle<> reset_waiter() noexcept {
+        int expected_state = eWaiting;
+        if (!m_state.compare_exchange_strong(expected_state, ePending, 
+            std::memory_order_acq_rel, std::memory_order_relaxed)) 
+        {
+            return nullptr;
+        }
+        return std::exchange(m_waiter, nullptr);
+    }
+
     inline bool get_canceled() const noexcept {
         return m_state.load(std::memory_order_acquire) == eCanceled;
     }
 
     enum CancelState {
-        eUnused,
         ePending,
         eCanceled,
         eWaiting
     };
 
-    std::atomic_int m_state { eUnused };
+    std::atomic_int m_state { ePending };
     std::coroutine_handle<> m_waiter { nullptr };
 };
 
