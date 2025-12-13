@@ -9,24 +9,21 @@ list(REMOVE_ITEM SOURCE "${PROJECT_SOURCE_DIR}/src/main.cpp")
 add_executable(coroutine "${PROJECT_SOURCE_DIR}/src/main.cpp" ${SOURCE} ${HEADER})
 target_include_directories(coroutine PRIVATE "${PROJECT_SOURCE_DIR}/include")
 
+if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+target_link_libraries(coroutine PUBLIC uring)
+endif(CMAKE_SYSTEM_NAME MATCHES "Linux")
+
 enable_testing()
 
 add_executable(test_atomic_queue "${PROJECT_SOURCE_DIR}/test/test_atomic_queue.cpp" ${SOURCE} ${HEADER})
 target_include_directories(test_atomic_queue PRIVATE "${PROJECT_SOURCE_DIR}/include")
-target_link_libraries(test_atomic_queue PRIVATE atomic)
 add_test(
     NAME test_atomic_queue
     COMMAND $<TARGET_FILE:test_atomic_queue>
 )
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
-    add_executable(io_uring "${PROJECT_SOURCE_DIR}/test/test_io_uring.cpp" ${SOURCE} ${HEADER})
-    target_include_directories(io_uring PRIVATE "${PROJECT_SOURCE_DIR}/include")
-    add_test(
-        NAME test_io_uring 
-        COMMAND sh -c "mkdir -p ${PROJECT_SOURCE_DIR}/tmp/scoro_test_io_uring \
-        && $<TARGET_FILE:io_uring> ${PROJECT_SOURCE_DIR}/tmp/scoro_test_io_uring"
-    )
+
 endif(CMAKE_SYSTEM_NAME MATCHES "Linux")
 
 list(APPEND IN_FILES "${CMAKE_SOURCE_DIR}/.clangd.in")

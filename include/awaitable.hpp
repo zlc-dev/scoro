@@ -1,5 +1,6 @@
 #pragma once
 
+#include "container/queue.hpp"
 #include "coro.hpp"
 #include "meta.hpp"
 #include "expected.hpp"
@@ -8,34 +9,38 @@
 #include <cstddef>
 #include <exception>
 #include <memory>
+#include <optional>
+#include <print>
+#include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace coro {
 
 template<typename Promise>
-struct ThisCoroAwaiter {
+struct ThisPromiseAwaitable {
     bool await_ready() {
         return false;
     }
 
     bool await_suspend(std::coroutine_handle<Promise> h) {
-        m_this = h;
+        m_this = &h.promise();
         return false;
     }
 
-    std::coroutine_handle<Promise> await_resume() {
-        return m_this;
+    Promise& await_resume() {
+        return *m_this;
     }
 
 private:
-    std::coroutine_handle<Promise> m_this { nullptr };
+    Promise* m_this { nullptr };
 };
 
-template<typename Promise = void>
-ThisCoroAwaiter<Promise> this_coroutine() {
+template<typename Promise>
+ThisPromiseAwaitable<Promise> this_promise() {
     return {};
 }
 
@@ -45,7 +50,7 @@ std::coroutine_handle<Promise> cast_coroutine(std::coroutine_handle<> handle) {
 }
 
 template<concepts::awaitable<void>... Awaitable>
-struct WaitAnyAwaiter {
+struct WaitAnyAwaitable {
 private:
     using AwaitableResults = typelist_castto_t<std::variant,
         typelist_unique_t<
@@ -63,7 +68,7 @@ private:
 
 public:
 
-    WaitAnyAwaiter(Awaitable&&... awaitable)
+    WaitAnyAwaitable(Awaitable&&... awaitable)
         : m_awaitables(std::forward<Awaitable>(awaitable)...),
         m_state(std::make_shared<State>())
     {}
@@ -116,12 +121,12 @@ public:
                 if (exception != nullptr) {
                     state->result.template emplace<std::exception_ptr>(std::move(exception));
                 }
+                handle.resume();
             } else {
-                alignas(Value) std::byte ret_buf [sizeof(Value)];
+                std::optional<Value> ret {};
                 std::exception_ptr exception {};
                 try {
-                    auto ret = co_await awaitable;
-                    new(ret_buf) Value(std::move(ret));
+                    ret.emplace(co_await awaitable);
                 } catch (...) {
                     exception = std::current_exception();
                 }
@@ -131,19 +136,21 @@ public:
                     std::memory_order_release, std::memory_order_relaxed)) {
                     co_return;
                 }
+                
                 if (exception != nullptr) {
-                    state->result.template emplace<std::exception_ptr>(std::move(exception));
+                    state->results.template emplace<std::exception_ptr>(std::move(exception));
+                } else if (ret) {
+                    state->results.template emplace<Value>(std::move(ret.value()));
                 } else {
-                    state->result.template emplace<Value>(std::move(*reinterpret_cast<Value*>(ret_buf)));
-                    if constexpr (!std::is_trivially_destructible_v<Value>)
-                        reinterpret_cast<Value*>(ret_buf)->~Value();
+                    state->results.template emplace<std::exception_ptr>(std::make_exception_ptr(std::runtime_error("null exception")));
                 }
+
+                handle.resume();
             }
-            handle.resume();
         };
 
         [this, handle, runner]<size_t... Idx>(std::index_sequence<Idx...>) {
-            (runner(std::forward<Awaitable>(std::get<Idx>(m_awaitables)), Idx, m_state, handle), ...);
+            (runner(std::get<Idx>(m_awaitables), Idx, m_state, handle), ...);
         }(std::make_index_sequence<sizeof...(Awaitable)>());
     }
 
@@ -156,13 +163,27 @@ private:
     std::shared_ptr<State> m_state;
 };
 
-template<concepts::awaitable<void>... Awaitable>
-WaitAnyAwaiter<Awaitable...> wait_any(Awaitable&&... awaitable) {
-    return { std::forward<Awaitable>(awaitable)... };
+
+template<typename Awaitable>
+static auto awaitable_cast_strict(Awaitable&& awaitable) {
+    if constexpr (concepts::awaitable<Awaitable, void>) {
+        return std::forward<Awaitable>(awaitable);
+    } else if constexpr (requires { std::forward<Awaitable>(awaitable).operator co_await(); }) {
+        return awaitable_cast_strict(std::forward<Awaitable>(awaitable).operator co_await());
+    } else if constexpr (requires { operator co_await(std::forward<Awaitable>(awaitable)); }){
+        return awaitable_cast_strict(operator co_await(std::forward<Awaitable>(awaitable)));
+    } else {
+        static_assert(false, "is not awaitable");
+    }
+};
+
+template<typename... Awaitable>
+auto wait_any(Awaitable&&... awaitable) {
+    return WaitAnyAwaitable { awaitable_cast_strict(std::forward<Awaitable>(awaitable))... };
 }
 
 template<concepts::awaitable<void>... Awaitable>
-struct WaitAllAwaiter {
+struct WaitAllAwaitable {
 private:
 
     template<typename T>
@@ -181,7 +202,6 @@ private:
         using type = tl::expected<T, std::exception_ptr>;
     };
 
-public:
 
     using AwaitableResults = typelist_castto_t<std::tuple,
         typelist_map_t<ToState,
@@ -200,7 +220,8 @@ public:
         AwaitableResults result {};
     };
 
-    WaitAllAwaiter(Awaitable&&... awaitable)
+public:
+    WaitAllAwaitable(Awaitable&&... awaitable)
         : m_awaitables(std::forward<Awaitable>(awaitable)...),
         m_state(std::make_shared<State>())
     {}
@@ -294,9 +315,111 @@ private:
     std::shared_ptr<State> m_state;
 };
 
+template<typename... Awaitable>
+WaitAllAwaitable<Awaitable...> wait_all(Awaitable&&... awaitable) {
+    return { awaitable_cast_strict(std::forward<Awaitable>(awaitable))... };
+}
+
 template<concepts::awaitable<void>... Awaitable>
-WaitAllAwaiter<Awaitable...> wait_all(Awaitable&&... awaitable) {
-    return { std::forward<Awaitable>(awaitable)... };
+struct WaitEachAwaitable {
+private:
+    using AwaitableResults = typelist_castto_t<std::variant,
+        typelist_unique_t<
+            typelist_remove_t<
+                TypeList<std::monostate, std::exception_ptr, decltype(std::declval<Awaitable>().await_resume())...>,
+                void
+            >
+        >
+    >;
+
+    using id_result = std::pair<size_t, AwaitableResults>;
+
+    struct State {
+        std::atomic_size_t remaining { sizeof...(Awaitable) };
+        std::atomic<void*> coroutine_addr { nullptr };
+        nct::AtomicQueue<id_result> results {};
+    };
+
+public:
+
+    WaitEachAwaitable(Awaitable&&... awaitable) : m_state(std::make_shared<State>())
+    {
+        auto runner = []<typename Awaitable_>(
+            Awaitable_ awaitable, 
+            int index, 
+            std::shared_ptr<State> state
+        ) -> TrivialFuture {
+            using Value = decltype(std::declval<Awaitable_>().await_resume());
+            if constexpr (std::is_same_v<Value, void>) {
+                std::exception_ptr exception {};
+                try {
+                    co_await awaitable;
+                } catch (...) {
+                    exception = std::current_exception();
+                }
+                if (exception != nullptr) {
+                    state->results.enqueue(index, std::move(exception));
+                } else {
+                    state->results.enqueue(index, std::monostate {});
+                }
+            } else {
+                std::optional<Value> ret {};
+                std::exception_ptr exception {};
+                try {
+                    ret.emplace(co_await awaitable);
+                } catch (...) {
+                    exception = std::current_exception();
+                }
+                if (exception != nullptr) {
+                    state->results.enqueue(index, std::move(exception));
+                } else if (ret) {
+                    state->results.enqueue(index, std::move(ret.value()));
+                } else {
+                    state->results.enqueue(index, std::make_exception_ptr(std::runtime_error("null exception")));
+                }
+            }
+            state->remaining.fetch_sub(1, std::memory_order_release);
+            // 一定要先存结果再尝试唤醒，使用release内存序进行保证
+            if (void* coroutine_addr = state->coroutine_addr.exchange(nullptr, std::memory_order_acq_rel); coroutine_addr) {
+                std::coroutine_handle<> handle = std::coroutine_handle<>::from_address(coroutine_addr);
+                handle.resume();
+            }
+        };
+
+        [this, runner]<size_t... Idx, typename... Awaitable_>(std::index_sequence<Idx...>, Awaitable_&&... awaitable_) {
+            (runner(std::forward<Awaitable_>(awaitable_), Idx, m_state), ...);
+        }(std::make_index_sequence<sizeof...(Awaitable)>(), std::forward<Awaitable>(awaitable)...);
+    }
+
+    bool await_ready() {
+        // 如果剩下的任务数量为0或结果队列非空，则协程不休眠
+        return m_state->remaining.load(std::memory_order_acquire) == 0 || !m_state->results.maybe_empty();
+    }
+
+    void await_suspend(std::coroutine_handle<> handle) {
+        m_state->coroutine_addr.store(handle.address(), std::memory_order_release);
+        // maybe_empty只可能在正在插入时误判，而唤醒在插入之后，所以这里如果误判了也不会漏唤醒，因为正在插入的线程稍后会唤醒
+        if (!m_state->results.maybe_empty()) {
+            // 如果队列非空（这是准确的)，则尝试唤醒正在等待的handle，exchange保证不会重复唤醒
+            if (void* coroutine_addr = m_state->coroutine_addr.exchange(nullptr, std::memory_order_acq_rel); coroutine_addr) {
+                std::coroutine_handle<> handle = std::coroutine_handle<>::from_address(coroutine_addr);
+                handle.resume();
+            }
+        }
+    }
+
+    std::optional<id_result> await_resume() {
+        return m_state->results.try_dequeue();
+    }
+
+
+public:
+    std::shared_ptr<State> m_state;
+};
+
+template<typename... Awaitable>
+auto wait_each(Awaitable&&... awaitable) {
+    return WaitEachAwaitable { awaitable_cast_strict(std::forward<Awaitable>(awaitable))... };
 }
 
 } // namespace coro

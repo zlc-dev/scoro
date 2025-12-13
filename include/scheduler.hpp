@@ -22,7 +22,7 @@ public:
 static_assert(concepts::scheduler<TrivialScheduler>);
 
 template<concepts::scheduler Scheduler>
-struct SchedAwaiter {
+struct SchedAwaitable {
     bool await_ready() {
         return false;
     }
@@ -36,7 +36,7 @@ struct SchedAwaiter {
 };
 
 template<concepts::scheduler Scheduler = TrivialScheduler>
-inline SchedAwaiter<Scheduler> sched() {
+inline SchedAwaitable<Scheduler> sched() {
     return {};
 }
 

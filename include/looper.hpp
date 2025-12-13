@@ -17,7 +17,8 @@ public:
     LooperSchedulerRunner()
         : m_tasks{}, m_mutex{}, m_cv{}, 
         m_stop{ false }, m_worker([this] { run(); }) 
-    {}
+    {
+    }
 
     ~LooperSchedulerRunner() {
         stop();
@@ -52,7 +53,6 @@ private:
                 m_tasks.pop();
                 locker.unlock();
                 try {
-                    std::println("resume a task");
                     task.resume();
                 } catch (const std::exception& e) {
                     std::println(std::cerr, "unhandled exception: {}", e.what());
@@ -74,15 +74,13 @@ private:
 };
 
 class LooperScheduler {
-private:
-    inline static LooperSchedulerRunner m_runner {};
-
 public:
 
     LooperScheduler() = default;
     ~LooperScheduler() = default;
 
     void submit(std::coroutine_handle<> handle) {
+        static LooperSchedulerRunner m_runner {};
         m_runner.submit(handle);
     }
 

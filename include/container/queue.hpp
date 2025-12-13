@@ -2,88 +2,132 @@
 
 #include <atomic>
 #include <cassert>
-#include <cstddef>
-#include <memory>
 #include <optional>
-#include <print>
+#include <mutex>
+#include <type_traits>
+#include <utility>
 
-template<typename T, typename Allocator = std::allocator<T>>
+namespace nct {
+
+template <typename T>
 class AtomicQueue {
 public:
-    struct Node {
-        alignas(alignof(T)) std::byte payload[sizeof(T)];
-        Node* next { nullptr };
-        std::atomic_int internal_count { 0 };
-    };
-
-    struct NodePtr {
-        Node* node;
-        int external_count;
-    };
-
-    AtomicQueue() : m_head(NodePtr { new Node(), 0 }), m_tail(m_head.load().node) {}
-
-    template<typename... Args>
-    void push(Args&&... args) {
-        Node* new_node = new Node();
-        new (new_node->payload) T ( std::forward<Args>(args)... );
-        Node* tail = m_tail.load(std::memory_order_acquire);
-        for(;;) {
-            if(m_tail.compare_exchange_strong(
-                tail, new_node,
-                std::memory_order_acq_rel, std::memory_order_acquire
-            ))
-            {
-                tail->next = new_node;
-                break;
-            }
-        }
+    AtomicQueue() {
+        auto *stub = new Node();
+        m_head.store(stub, std::memory_order_relaxed);
+        m_tail.store(stub, std::memory_order_relaxed);
     }
 
-    std::optional<T> pop() {
-        NodePtr head = m_head.load(std::memory_order_acquire);
-        
-        std::optional<T> ret {};
-        for(;;) {
-            if(!m_head.compare_exchange_strong(
-                head, NodePtr { head.node, head.external_count + 1 },
-                std::memory_order_acq_rel, std::memory_order_acquire
-            )) {
-                continue;
-            }
+    ~AtomicQueue() {
+        stop();
+        while (try_dequeue()) { /* drain */ }
+        Node *stub = m_head.exchange(nullptr);
+        delete stub;
+    }
 
-            if (int cnt = head.node->internal_count.fetch_sub(1); cnt == 1) {
-                delete head.node;
-                continue;
-            } else if (cnt > 0) {
-                continue;
-            }
+    AtomicQueue(const AtomicQueue&) = delete;
+    AtomicQueue(AtomicQueue&&) = delete;
+    AtomicQueue& operator=(const AtomicQueue&) = delete;
+    AtomicQueue& operator=(AtomicQueue&&) = delete;
 
-            if(head.node->next == nullptr) {
-                break;
-            }
-
-            head.external_count++;
-            if(m_head.compare_exchange_strong(
-                head, NodePtr { head.node->next, 1 },
-                std::memory_order_acq_rel, std::memory_order_acquire
-            )) {
-                ret.emplace(std::move(*reinterpret_cast<T*>(head.node->next->payload)));
-                reinterpret_cast<T*>(head.node->next->payload)->~T();
-                if (head.node->next->internal_count.fetch_sub(1) == 1) {
-                    delete head.node->next;
-                }
-                if (head.node->internal_count.fetch_add(head.external_count) == -head.external_count) {
-                    delete head.node;
-                }
-                break;
-            }
+    template <typename... Args>
+    bool enqueue(Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>) {
+        Node *n = new(std::nothrow) Node(std::in_place_type<T>, std::forward<Args>(args)...);
+        if (!n) { 
+            return false; 
         }
-        return std::move(ret);
+        Node *tail = m_tail.load(std::memory_order_relaxed);
+        do {
+            if (tail == nullptr) {
+                n->value.~T();
+                delete n;
+                return false;
+            }  
+        } while(!m_tail.compare_exchange_weak(
+            tail, n, 
+            std::memory_order_release, std::memory_order_relaxed
+        ));
+        tail->next.store(n, std::memory_order_release);
+        m_tail.notify_one();
+        return true;
+    }
+
+    std::optional<T> try_dequeue() noexcept(std::is_nothrow_move_constructible_v<T>) {
+        std::lock_guard<std::mutex> _locker { m_mutex };
+        Node *head = m_head.load(std::memory_order_acquire);
+        Node *next = head->next.load(std::memory_order_relaxed);
+        if (next == nullptr)
+            return std::nullopt;
+        m_head.store(next, std::memory_order_release);
+        delete head;
+        std::optional<T> result(std::move(next->value));
+        next->value.~T();
+        return result;
+    }
+
+    std::optional<T> wait_dequeue() noexcept(std::is_nothrow_move_constructible_v<T>) {
+        std::unique_lock<std::mutex> locker { m_mutex };
+        Node *head = m_head.load(std::memory_order_acquire);
+        Node *tail = m_tail.load(std::memory_order_acquire);
+        Node *next = head->next.load(std::memory_order_relaxed);
+        while (next == nullptr) {
+            if (tail == nullptr) return std::nullopt;
+            if (head == tail) {
+                locker.unlock();
+                m_tail.wait(tail);
+                locker.lock();
+                head = m_head.load(std::memory_order_acquire);
+                next = head->next.load(std::memory_order_relaxed);
+            }
+            tail = m_tail.load(std::memory_order_acquire);
+        }
+        m_head.store(next, std::memory_order_release);
+        delete head;
+        std::optional<T> result(std::move(next->value));
+        next->value.~T();
+        return result;
+    }
+
+    /**
+    * @brief check empty
+    * 
+    * @return false - Guaranteed non-empty
+    * @return true  - Possibly empty (may include false positives)
+    * 
+    * @note Thread-safe but may spuriously report empty on non-empty queues.
+    *       Never incorrectly reports non-empty on actually empty queues.
+    */
+    bool maybe_empty() const noexcept {
+        Node *head = m_head.load(std::memory_order_relaxed);
+        return !head->next;
+    }
+
+    void stop() noexcept {
+        m_tail.store(nullptr, std::memory_order_release);
+        m_tail.notify_all();
     }
 
 private:
-    std::atomic<NodePtr> m_head;
+
+    struct Node {
+        std::atomic<Node*> next;
+        union {
+            T value;
+        };
+
+        Node() noexcept : next(nullptr) {}
+
+        template<typename... Args>
+        explicit Node(std::in_place_type_t<T>, Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>) 
+            : next(nullptr), value{ std::forward<Args>(args)... } {}
+
+        ~Node() {}
+    };
+
+private:
+    std::mutex m_mutex;
     std::atomic<Node*> m_tail;
+    std::atomic<Node*> m_head;
 };
 
+}

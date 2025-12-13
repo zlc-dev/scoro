@@ -115,7 +115,7 @@ namespace coro {
 namespace detail {
     
     template<typename T>
-    struct TimeoutAwaiterState {
+    struct TimeoutAwaitableState {
         enum {
             ePending = 0,
             eValid,
@@ -128,7 +128,7 @@ namespace detail {
         std::atomic_int state { 0 };
         std::coroutine_handle<> caller { nullptr };
 
-        ~TimeoutAwaiterState() {
+        ~TimeoutAwaitableState() {
             if (state.load(std::memory_order_acquire) == eValid) {
                 reinterpret_cast<T*>(buf)->~T();
             }  
@@ -136,7 +136,7 @@ namespace detail {
     };
 
     template<>
-    struct TimeoutAwaiterState<void> {
+    struct TimeoutAwaitableState<void> {
         enum {
             ePending = 0,
             eValid,
@@ -153,7 +153,7 @@ namespace detail {
 template<typename Timer>
 class TimerWrapper: public Timer {
 
-    struct SleepAwaiter {
+    struct SleepAwaitable {
         using Clock = typename Timer::Clock;
 
         bool await_ready() const noexcept {
@@ -180,17 +180,17 @@ class TimerWrapper: public Timer {
     };
 
     template<typename R>
-    struct TimeoutAwaiter {
+    struct TimeoutAwaitable {
     private:
 
-        using State = typename detail::TimeoutAwaiterState<R>;
+        using State = typename detail::TimeoutAwaitableState<R>;
         using Clock = typename Timer::Clock;
 
     public:
         using return_type = std::conditional_t<std::is_same_v<R, void>, bool, std::optional<R>>;
 
         template<typename Awaitable>
-        TimeoutAwaiter(Awaitable&& awaitable, const std::chrono::time_point<Clock>& timeout, TimerWrapper<Timer>& timer)
+        TimeoutAwaitable(Awaitable&& awaitable, const std::chrono::time_point<Clock>& timeout, TimerWrapper<Timer>& timer)
             : m_state{std::make_shared<State>()}, 
             m_timeout{timeout}, 
             m_future {             
@@ -278,14 +278,14 @@ class TimerWrapper: public Timer {
     };
 
     template<typename Awaitable>
-    using TimeoutFuture = Future<typename TimeoutAwaiter<decltype(std::declval<Awaitable>().await_resume())>::return_type>;
+    using TimeoutFuture = Future<typename TimeoutAwaitable<decltype(std::declval<Awaitable>().await_resume())>::return_type>;
 
 public:
     using Clock = typename Timer::Clock;
     using Timer::Timer;
 
     auto sleep_until(const std::chrono::time_point<Clock>& wake_time) {
-        return SleepAwaiter { wake_time, *this };
+        return SleepAwaitable { wake_time, *this };
     }
 
     template<typename Rep, typename Period>
@@ -296,7 +296,7 @@ public:
     template<typename Scheduler = TrivialScheduler, typename Awaitable>
     TimeoutFuture<Awaitable> with_timeout_until(Awaitable&& awaitable, const std::chrono::time_point<Clock>& timeout) {
         using Ret = decltype(std::declval<Awaitable>().await_resume());
-        auto r = co_await TimeoutAwaiter<Ret> { std::move(awaitable), timeout, *this };
+        auto r = co_await TimeoutAwaitable<Ret> { std::move(awaitable), timeout, *this };
         co_await sched<Scheduler>();
         co_return std::move(r);
     }
