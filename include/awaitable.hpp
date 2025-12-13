@@ -10,13 +10,37 @@
 #include <exception>
 #include <memory>
 #include <optional>
+#include <ostream>
 #include <print>
 #include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
-#include <vector>
+
+namespace  {
+
+template<typename T>
+struct no_rref_storage_t {
+    using type = T;
+};
+
+template<typename T>
+struct no_rref_storage_t<T &&> {
+    using type = T;
+};
+
+template<typename T>
+struct no_rref_storage_t<T &> {
+    using type = T &;
+};
+
+}
+
+template<typename T>
+void print_func() {
+    std::println(__PRETTY_FUNCTION__);
+}
 
 namespace coro {
 
@@ -71,7 +95,8 @@ public:
     WaitAnyAwaitable(Awaitable&&... awaitable)
         : m_awaitables(std::forward<Awaitable>(awaitable)...),
         m_state(std::make_shared<State>())
-    {}
+    {
+    }
 
     bool await_ready() {
         auto checker = [this]<typename Awaitable_>(
@@ -99,12 +124,13 @@ public:
 
     void await_suspend(std::coroutine_handle<> handle) {
         auto runner = []<typename Awaitable_>(
-            Awaitable_&& awaitable, 
+            Awaitable_&& awaitable_, 
             int index, 
             std::shared_ptr<State> state, 
             std::coroutine_handle<> handle
         ) -> TrivialFuture {
             using Value = decltype(std::declval<Awaitable_>().await_resume());
+            Awaitable_ awaitable = std::forward<Awaitable_>(awaitable_);
             if constexpr (std::is_same_v<Value, void>) {
                 std::exception_ptr exception {};
                 try {
@@ -138,11 +164,11 @@ public:
                 }
                 
                 if (exception != nullptr) {
-                    state->results.template emplace<std::exception_ptr>(std::move(exception));
+                    state->result.template emplace<std::exception_ptr>(std::move(exception));
                 } else if (ret) {
-                    state->results.template emplace<Value>(std::move(ret.value()));
+                    state->result.template emplace<Value>(std::move(ret.value()));
                 } else {
-                    state->results.template emplace<std::exception_ptr>(std::make_exception_ptr(std::runtime_error("null exception")));
+                    state->result.template emplace<std::exception_ptr>(std::make_exception_ptr(std::runtime_error("null exception")));
                 }
 
                 handle.resume();
@@ -150,7 +176,7 @@ public:
         };
 
         [this, handle, runner]<size_t... Idx>(std::index_sequence<Idx...>) {
-            (runner(std::get<Idx>(m_awaitables), Idx, m_state, handle), ...);
+            (runner(std::forward<Awaitable>(std::get<Idx>(m_awaitables)), Idx, m_state, handle), ...);
         }(std::make_index_sequence<sizeof...(Awaitable)>());
     }
 
@@ -165,21 +191,31 @@ private:
 
 
 template<typename Awaitable>
+requires concepts::awaitable<Awaitable, void>
+static Awaitable awaitable_cast_strict(Awaitable&& awaitable);
+
+template<typename Awaitable>
 static auto awaitable_cast_strict(Awaitable&& awaitable) {
-    if constexpr (concepts::awaitable<Awaitable, void>) {
-        return std::forward<Awaitable>(awaitable);
-    } else if constexpr (requires { std::forward<Awaitable>(awaitable).operator co_await(); }) {
+    if constexpr (requires { std::forward<Awaitable>(awaitable).operator co_await(); }) {
         return awaitable_cast_strict(std::forward<Awaitable>(awaitable).operator co_await());
     } else if constexpr (requires { operator co_await(std::forward<Awaitable>(awaitable)); }){
         return awaitable_cast_strict(operator co_await(std::forward<Awaitable>(awaitable)));
     } else {
         static_assert(false, "is not awaitable");
     }
+}
+
+template<typename Awaitable>
+requires concepts::awaitable<Awaitable, void>
+static Awaitable awaitable_cast_strict(Awaitable&& awaitable) {
+    return std::forward<Awaitable>(awaitable);
 };
 
 template<typename... Awaitable>
 auto wait_any(Awaitable&&... awaitable) {
-    return WaitAnyAwaitable { awaitable_cast_strict(std::forward<Awaitable>(awaitable))... };
+    return WaitAnyAwaitable<decltype(awaitable_cast_strict(std::forward<Awaitable>(awaitable)))...> { 
+        awaitable_cast_strict(std::forward<Awaitable>(awaitable))... 
+    };
 }
 
 template<concepts::awaitable<void>... Awaitable>
@@ -254,11 +290,12 @@ public:
     void await_suspend(std::coroutine_handle<> handle) {
         auto runner = []<size_t Idx, typename Awaitable_>(
             std::in_place_index_t<Idx>,
-            Awaitable_&& awaitable,
+            Awaitable_&& awaitable_,
             std::shared_ptr<State> state, 
             std::coroutine_handle<> handle
         ) -> TrivialFuture {
             using Value = decltype(std::declval<Awaitable_>().await_resume());
+            Awaitable_ awaitable = std::forward<Awaitable_>(awaitable_);
             try {
                 if constexpr (std::is_same_v<Value, void>) {
                     co_await awaitable;
@@ -317,7 +354,9 @@ private:
 
 template<typename... Awaitable>
 WaitAllAwaitable<Awaitable...> wait_all(Awaitable&&... awaitable) {
-    return { awaitable_cast_strict(std::forward<Awaitable>(awaitable))... };
+    return WaitAllAwaitable<decltype(awaitable_cast_strict(std::forward<Awaitable>(awaitable)))...> { 
+        awaitable_cast_strict(std::forward<Awaitable>(awaitable))... 
+    };
 }
 
 template<concepts::awaitable<void>... Awaitable>
@@ -345,11 +384,12 @@ public:
     WaitEachAwaitable(Awaitable&&... awaitable) : m_state(std::make_shared<State>())
     {
         auto runner = []<typename Awaitable_>(
-            Awaitable_ awaitable, 
+            Awaitable_&& awaitable_, 
             int index, 
             std::shared_ptr<State> state
         ) -> TrivialFuture {
             using Value = decltype(std::declval<Awaitable_>().await_resume());
+            Awaitable_ awaitable = std::forward<Awaitable_>(awaitable_);
             if constexpr (std::is_same_v<Value, void>) {
                 std::exception_ptr exception {};
                 try {
@@ -419,7 +459,9 @@ public:
 
 template<typename... Awaitable>
 auto wait_each(Awaitable&&... awaitable) {
-    return WaitEachAwaitable { awaitable_cast_strict(std::forward<Awaitable>(awaitable))... };
+    return WaitEachAwaitable<decltype(awaitable_cast_strict(std::forward<Awaitable>(awaitable)))...> { 
+        awaitable_cast_strict(std::forward<Awaitable>(awaitable))... 
+    };
 }
 
 } // namespace coro

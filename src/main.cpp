@@ -120,15 +120,27 @@ CancelableWaitableFuture<void> test_cancel() {
 }
 
 
-WaitableFuture<void> test_wait_each() {
-    auto tasks = wait_each(get_global_timer().sleep_for(500ms), get_global_timer().sleep_for(1s));
+CancelableWaitableFuture<void> test_wait_each() {
+    auto& promise = co_await this_promise<CancelableWaitableFuture<void>::promise_type>();
+    auto cancel_waiter = promise.wait_cancel();
+    if (!cancel_waiter) {
+        std::println("canceled");
+        co_return;
+    }
+    auto cancelable_task = test_cancel().detach();
+    auto tasks = wait_each(get_global_timer().sleep_for(500ms), cancelable_task, std::move(cancel_waiter.value()));
     auto start = std::chrono::steady_clock::now();
-    while(auto ret = co_await tasks) {
+    for(int i = 0; i < 2; ++i) {
+        auto ret = co_await tasks;
         auto [idx, res] = std::move(ret.value());
         if (idx == 0) {
             std::println("500ms");
         } else if (idx == 1) {
-            std::println("1s");
+            std::println("task");
+        } else if (idx == 2) {
+            std::println("cacneled");
+            cancelable_task.cancel();
+            --i;
         }
     }
     auto end = std::chrono::steady_clock::now();
@@ -136,44 +148,40 @@ WaitableFuture<void> test_wait_each() {
     co_return;
 }
 
-// static io::Service service {};
+static io::Service service {};
 
-// Future<void> test_rw() {
-//     char ch = 0;
-//     while(ch != 'q') {
-//         auto [idx, res] = co_await wait_any(
-//             service.read(STDIN_FILENO, &ch, 1, 0),
-//             get_global_timer().sleep_for(5s)
-//         );
-//         if (idx == 1) {
-//             co_await service.nop(); // to wake service
-//             std::println("read timeout");
-//             break;
-//         } else if (idx == 0) {
-//             if (std::get<int>(res) < 0) {
-//                 exit(std::get<int>(res));
-//             }
-//         }
-//         co_await service.write(STDOUT_FILENO, &ch, 1, 0);
-//     }
-// }
+Future<void> test_rw() {
+    char ch = 0;
+    while(ch != 'q') {
+        auto [idx, res] = co_await wait_any(
+            service.read(STDIN_FILENO, &ch, 1, 0),
+            get_global_timer().sleep_for(5s)
+        );
+        if (idx == 1) {
+            co_await service.nop(); // to wake service
+            std::println("read timeout");
+            break;
+        } else if (idx == 0) {
+            if (std::get<int>(res) < 0) {
+                exit(std::get<int>(res));
+            }
+        }
+        co_await service.write(STDOUT_FILENO, &ch, 1, 0);
+    }
+}
 
 int main() {
 
-    // service.run(test_rw());
+    service.run(test_rw());
 
-    test_wait_each().wait();
-
-    auto t1 = test_cancel();
-    std::this_thread::sleep_for(300ms);
-    while (!t1.wait_for(500ms)) {
-        t1.cancel();
-    }
-    t1.get();
+    auto t0 = test_wait_each();
+    t0.cancel();
+    t0.wait();
+    t0.get();
 
     test_sem().wait();
-    auto t2 = test_waitall();
-    t2.wait();
+    auto t1 = test_waitall();
+    t1.wait();
 
     test_timeout();
     std::counting_semaphore<> sem{0};

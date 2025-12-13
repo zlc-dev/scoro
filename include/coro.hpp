@@ -410,7 +410,7 @@ public:
     inline T await_resume() {
         return m_coroutine.promise().get();
     }
-private:
+protected:
     std::coroutine_handle<promise_type> m_coroutine;
 };
 
@@ -578,6 +578,7 @@ public:
 
 };
 
+
 template<typename T, bool Nothrow = false>
 struct CancelableFuture: public Future<T, Nothrow> {
     using promise_type = CancelablePromise<T, Nothrow>;
@@ -601,6 +602,20 @@ public:
     using CancelablePromiseBase::wait_cancel;
 };
 
+template <typename T, bool Nothrow>
+struct [[nodiscard]] DetachedCancelableWaitableFuture: public DetachedWaitableFuture<T, Nothrow> {
+public:    
+    
+    using promise_type = CancelableWaitablePromise<T>;
+    using DetachedWaitableFuture<T, Nothrow>::DetachedWaitableFuture;
+
+    void cancel() noexcept {
+        std::coroutine_handle<promise_type> handle = 
+            std::coroutine_handle<promise_type>::from_address(DetachedWaitableFuture<T, Nothrow>::m_coroutine.address());
+        promise_type& promise = handle.promise();
+        promise.cancel();
+    }
+};
 
 template<typename T, bool Nothrow = false>
 struct CancelableWaitableFuture: public WaitableFuture<T, Nothrow> {
@@ -612,6 +627,10 @@ struct CancelableWaitableFuture: public WaitableFuture<T, Nothrow> {
             std::coroutine_handle<promise_type>::from_address(WaitableFuture<T, Nothrow>::m_coroutine.address());
         promise_type& promise = handle.promise();
         promise.cancel();
+    }
+
+    DetachedCancelableWaitableFuture<T, Nothrow> detach() && {
+        return { std::exchange(WaitableFuture<T, Nothrow>::m_coroutine, nullptr) };
     }
 };
 
