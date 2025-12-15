@@ -1,21 +1,16 @@
 #include "awaitable.hpp"
 #include "coro.hpp"
 #include "io/service.hpp"
-#include "looper.hpp"
-#include "ptr/intrusive_ptr.hpp"
-#include "scheduler.hpp"
+#include "ptr/rc_ptr.hpp"
 #include "sync.hpp"
 #include "timer.hpp"
 #include <chrono>
-#include <concepts>
 #include <coroutine>
 #include <exception>
-#include <future>
 #include <iostream>
 #include <print>
 #include <semaphore>
 #include <stdexcept>
-#include <thread>
 #include <type_traits>
 #include <unistd.h>
 #include <utility>
@@ -23,8 +18,7 @@
 using namespace std::chrono_literals;
 using namespace coro;
 
-Future<int> fib(int x) {
-    co_await sched<LooperScheduler>();
+Future<int, true> fib(int x) {
     if (x < 0) {
         co_return co_await fib(x + 2) - co_await fib(x + 1);
     } else if (x < 2) {
@@ -34,7 +28,7 @@ Future<int> fib(int x) {
     }
 }
 
-Future<int> test_success() {
+Future<int, true> test_success() {
     co_await get_global_timer().sleep_for(500ms);
     co_return 42;
 }
@@ -47,6 +41,17 @@ Future<void> test_fail() {
     }
     co_return;
 }
+
+
+Future<int&, true> test_ref() {
+    static int x = 100;
+    co_return x;
+}
+
+Future<std::exception_ptr> test_return_exception_ptr() {
+    co_return std::make_exception_ptr(std::runtime_error("test"));
+}
+
 
 void test_timeout() {
     WaitableFuture<int> future = make_waitable(test_success());
@@ -63,20 +68,17 @@ void test_timeout() {
 }
 
 WaitableFuture<void> test_waitall() {
-    auto t0 = std::chrono::steady_clock::now();
-    auto [r0, r1, r2] = co_await wait_all(
+    auto [r0, r1, r2] = (co_await wait_all(
         get_global_timer().sleep_for(100ms),
-        get_global_timer().sleep_for(200ms),
+        test_ref(),
         fib(8)
-    );
-    std::println("{}", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0));
-    if (r2) {
-        std::println("{}", r2.value());
-    }
+    )).view();
+    std::println("wait all");
+    std::println("{}", r1);
 }
 
 WaitableFuture<void> test_sem() {
-    auto sem = make_intrusive<coro::CountingSemaphore>( 3 );
+    auto sem = make_rc<coro::CountingSemaphore>( 3 );
     sem->release(-3);
     with_callback(
         get_global_timer().sleep_for(200ms), 
@@ -105,40 +107,49 @@ WaitableFuture<void> test_sem() {
     std::println("wait finish");
 }
 
-CancelableWaitableFuture<void> test_cancel() {
-    co_await sched<LooperScheduler>();
-    auto& promise = co_await this_promise<CancelableWaitableFuture<void>::promise_type>();
-    auto cancel_waiter = promise.wait_cancel();
-    auto [idx, res] = co_await wait_any(std::move(cancel_waiter), std::suspend_always {});
+CancelableWaitableFuture<bool> test_cancel() {
+    auto& promise = co_await this_promise<CancelableWaitableFuture<bool>::promise_type>();
+    auto [idx, res] = co_await wait_any(promise.wait_cancel(), get_global_timer().sleep_for(300ms));
     if (idx == 0) {
         std::println("test_cancel: canceled");
+        co_return false;
     }
-    co_return;
+    co_return true;
 }
 
-
-CancelableWaitableFuture<void> test_wait_each() {
-    auto& promise = co_await this_promise<CancelableWaitableFuture<void>::promise_type>();
+CancelableWaitableFuture<void, true> test_wait_each() {
+    auto& promise = co_await this_promise<CancelableWaitableFuture<void, true>::promise_type>();
     auto cancelable_task = test_cancel().detach();
     co_await get_global_timer().with_timeout_for(promise.wait_cancel(), 100ms);
-    auto tasks = wait_each(get_global_timer().sleep_for(500ms), cancelable_task, promise.wait_cancel());
-    auto start = std::chrono::steady_clock::now();
-    for(int i = 0; i < 2; ) {
+    auto sleep = get_global_timer().sleep_for_cancelable(500ms);
+    auto tasks = wait_each(sleep, cancelable_task, promise.wait_cancel(), test_return_exception_ptr());
+    for(int i = 0; i < 3; ) {
         auto ret = co_await tasks;
-        auto [idx, res] = std::move(ret.value());
+        const auto [idx, res] = std::move(ret.value());
         if (idx == 0) {
-            std::println("500ms");
+            if (res.get<0>()) {
+                std::println("500ms");
+                if (cancelable_task.cancel()) {
+                    std::println("cancelable_task timeout");
+                }
+            } else std::println("sleep cacneled");
             ++i;
         } else if (idx == 1) {
-            std::println("task");
+            if (res.get<1>()) std::println("task finish");
             ++i;
         } else if (idx == 2) {
             std::println("test_wait_each: cacneled");
             cancelable_task.cancel();
+            sleep.cancel();
+        } else if (idx == 3) {
+            try {
+                std::rethrow_exception(res.get<3>());
+            } catch (const std::exception& e) {
+                std::println("wait each 3 : {}", e.what());
+            }
+            ++i;
         }
     }
-    auto end = std::chrono::steady_clock::now();
-    std::println("tot duration: {}", std::chrono::duration_cast<std::chrono::milliseconds>(end - start));
     co_return;
 }
 
@@ -156,27 +167,29 @@ Future<void> test_rw() {
             std::println("read timeout");
             break;
         } else if (idx == 0) {
-            if (std::get<int>(res) < 0) {
-                exit(std::get<int>(res));
+            if (res.get<0>() < 0) {
+                exit(res.get<0>());
             }
         }
         co_await service.write(STDOUT_FILENO, &ch, 1, 0);
     }
 }
 
+
 int main() {
+
 
     service.run(test_rw());
 
     auto t0 = test_wait_each();
-    t0.wait_for(1s);
-    t0.cancel();
+    t0.wait_for(700ms);
     t0.wait();
     t0.get();
 
     test_sem().wait();
     auto t1 = test_waitall();
     t1.wait();
+    t1.get();
 
     test_timeout();
     std::counting_semaphore<> sem{0};

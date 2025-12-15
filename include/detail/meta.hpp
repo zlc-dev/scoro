@@ -1,6 +1,56 @@
 #pragma once
 
+#include <functional>
 #include <type_traits>
+#include <variant>
+
+namespace detail::meta {
+
+
+template<typename, auto U>
+inline static constexpr auto dependent_value = U;
+
+template<typename T>
+inline constexpr bool dependent_false = dependent_value<T, false>;
+
+template<typename T>
+struct ReferenceStorage {
+    using type = T;
+};
+
+template<typename T>
+struct ReferenceStorage<T&> {
+    using type = std::reference_wrapper<T>;
+};
+
+template<typename T>
+struct ReferenceStorage<T&&> {
+    using type = T;
+};
+
+template<typename T>
+using reference_storage_t = typename ReferenceStorage<T>::type;
+
+template<typename T>
+struct DecayRvalue {
+    using type = T;
+};
+
+template<typename T>
+struct DecayRvalue<T&> {
+    using type = T&;
+};
+
+template<typename T>
+struct DecayRvalue<T&&> {
+    using type = T;
+};
+
+template<typename T>
+using decay_rvalue_t = typename DecayRvalue<T>::type;
+
+template<typename T>
+using void_map_t = std::conditional_t<std::is_same_v<T, void>, std::monostate, T>;
 
 template<typename... T>
 struct TypeList {};
@@ -53,11 +103,7 @@ struct TypeListUnique<TypeList<T, Ts...>> {
 private:
     using tail = typename TypeListUnique<TypeList<Ts...>>::type;
 public:
-    using type = std::conditional_t<
-        (std::is_same_v<T, Ts> || ...), 
-        tail,
-        typelist_concat_t<TypeList<T>, tail>
-    >;
+    using type = typelist_concat_t<TypeList<T>, typelist_remove_t<tail, T>>;
 };
 
 template<typename T>
@@ -85,3 +131,27 @@ public:
 
 template<template <typename> typename M, typename T>
 using typelist_map_t = typename TypeListMap<M, T>::type;
+
+template<typename>
+struct TypeListSize;
+
+template<typename... Ts>
+struct TypeListSize<TypeList<Ts...>>
+    : std::integral_constant<size_t, sizeof...(Ts)> {};
+
+template<typename T>
+inline constexpr size_t typelist_size_v = TypeListSize<T>::value;
+
+template<size_t N, typename List>
+    requires (N < typelist_size_v<List>)
+struct TypeListGet;
+
+template<size_t N, typename... Ts>
+struct TypeListGet<N, TypeList<Ts...>> {
+    using type = std::tuple_element_t<N, std::tuple<Ts...>>;
+};
+
+template<size_t N, typename T>
+using typelist_get_t = typename TypeListGet<N, T>::type;
+
+}

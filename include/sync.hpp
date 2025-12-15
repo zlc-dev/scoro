@@ -4,11 +4,12 @@
 #include "ptr/intrusive_ptr.hpp"
 #include <atomic>
 #include <coroutine>
+#include <mutex>
 #include <optional>
 #include <print>
 namespace coro {
 
-struct CountingSemaphore: intrusive_ref_counter_mt<CountingSemaphore> {
+struct CountingSemaphore {
 public:
 
     struct AcquireAwaitable {
@@ -41,7 +42,7 @@ public:
     CountingSemaphore(): CountingSemaphore(0) {} 
 
     ~CountingSemaphore() {
-        while(auto waiter = m_waiters.try_dequeue()) {
+        while(auto waiter = m_waiters.try_dequeue( std::lock_guard { m_mutex } )) {
             waiter->destroy();
         }
     }
@@ -60,7 +61,7 @@ public:
             std::memory_order_acq_rel, std::memory_order_relaxed
         ));
         while(need_wake-- > 0) {
-            if (auto waiter = m_waiters.wait_dequeue()) {
+            if (auto waiter = m_waiters.wait_dequeue(std::unique_lock { m_mutex })) {
                 waiter->resume();
             } else {
                 return;
@@ -108,6 +109,7 @@ private:
 
 private:
     std::atomic<Counter> m_count;
+    std::mutex m_mutex;
     nct::AtomicQueue<std::coroutine_handle<>> m_waiters;
 };
 

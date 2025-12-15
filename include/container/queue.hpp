@@ -1,9 +1,10 @@
 #pragma once
 
+#include "waitable_atomic.hpp"
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <optional>
-#include <mutex>
 #include <type_traits>
 #include <utility>
 
@@ -11,6 +12,11 @@ namespace nct {
 
 template <typename T>
 class AtomicQueue {
+private:
+    struct FakeLocker {
+        void lock() {}
+        void unlock() {}
+    };
 public:
     AtomicQueue() {
         auto *stub = new Node();
@@ -52,8 +58,8 @@ public:
         return true;
     }
 
-    std::optional<T> try_dequeue() noexcept(std::is_nothrow_move_constructible_v<T>) {
-        std::lock_guard<std::mutex> _locker { m_mutex };
+    template<typename Locker>
+    std::optional<T> try_dequeue(Locker locker) noexcept(std::is_nothrow_move_constructible_v<T>) {
         Node *head = m_head.load(std::memory_order_acquire);
         Node *next = head->next.load(std::memory_order_relaxed);
         if (next == nullptr)
@@ -65,27 +71,51 @@ public:
         return result;
     }
 
+    std::optional<T> try_dequeue() noexcept(std::is_nothrow_move_constructible_v<T>) {
+        return try_dequeue(FakeLocker {});
+    }
+
+    template<typename Locker>
+    std::optional<T> wait_dequeue(Locker locker) noexcept(std::is_nothrow_move_constructible_v<T>) {
+        return wait_dequeue_helper<false>(std::chrono::time_point<std::chrono::steady_clock>{}, std::move(locker));
+    }
+
     std::optional<T> wait_dequeue() noexcept(std::is_nothrow_move_constructible_v<T>) {
-        std::unique_lock<std::mutex> locker { m_mutex };
-        Node *head = m_head.load(std::memory_order_acquire);
-        Node *tail = m_tail.load(std::memory_order_acquire);
-        Node *next = head->next.load(std::memory_order_relaxed);
-        while (next == nullptr) {
-            if (tail == nullptr) return std::nullopt;
-            if (head == tail) {
-                locker.unlock();
-                m_tail.wait(tail);
-                locker.lock();
-                head = m_head.load(std::memory_order_acquire);
-                next = head->next.load(std::memory_order_relaxed);
-            }
-            tail = m_tail.load(std::memory_order_acquire);
-        }
-        m_head.store(next, std::memory_order_release);
-        delete head;
-        std::optional<T> result(std::move(next->value));
-        next->value.~T();
-        return result;
+        return wait_dequeue(FakeLocker {});
+    }
+
+    template <typename Clock, typename Dur, typename Locker>
+    std::optional<T> wait_dequeue_until(
+        const std::chrono::time_point<Clock, Dur>& atime,
+        Locker locker
+    ) noexcept(std::is_nothrow_move_constructible_v<T>) 
+    {
+        return wait_dequeue_helper<true>(atime, std::move(locker));
+    }
+
+    template <typename Clock, typename Dur>
+    std::optional<T> wait_dequeue_until(
+        const std::chrono::time_point<Clock, Dur>& atime
+    ) noexcept(std::is_nothrow_move_constructible_v<T>) 
+    {
+        return wait_dequeue_until(atime, FakeLocker {});
+    }
+
+    template <typename Clock = std::chrono::steady_clock, typename Rep, typename Period, typename Locker>
+    std::optional<T> wait_dequeue_for(
+        const std::chrono::duration<Rep, Period>& dur,
+        Locker locker
+    ) noexcept(std::is_nothrow_move_constructible_v<T>) 
+    {
+        return wait_dequeue_until(std::move(locker), Clock::now() + dur);
+    }
+
+    template <typename Clock = std::chrono::steady_clock, typename Rep, typename Period>
+    std::optional<T> wait_dequeue_for(
+        const std::chrono::duration<Rep, Period>& dur
+    ) noexcept(std::is_nothrow_move_constructible_v<T>) 
+    {
+        return wait_dequeue_for(dur, FakeLocker {});
     }
 
     /**
@@ -109,6 +139,37 @@ public:
 
 private:
 
+    template<bool Timeout, typename Clock, typename Dur,  typename Locker>
+    std::optional<T> wait_dequeue_helper(
+        const std::chrono::time_point<Clock, Dur>& atime,
+        Locker locker
+    ) noexcept(std::is_nothrow_move_constructible_v<T>) {
+        Node *head = m_head.load(std::memory_order_acquire);
+        Node *tail = m_tail.load(std::memory_order_acquire);
+        Node *next = head->next.load(std::memory_order_relaxed);
+        while (next == nullptr) {
+            if (tail == nullptr) return std::nullopt;
+            if (head == tail) {
+                locker.unlock();
+                if constexpr (Timeout) {
+                    bool success = m_tail.wait_until(tail, atime);
+                    if (!success) return std::nullopt;
+                } else {
+                    m_tail.wait(tail);
+                }
+                locker.lock();
+                head = m_head.load(std::memory_order_acquire);
+                next = head->next.load(std::memory_order_relaxed);
+            }
+            tail = m_tail.load(std::memory_order_acquire);
+        }
+        m_head.store(next, std::memory_order_release);
+        delete head;
+        std::optional<T> result(std::move(next->value));
+        next->value.~T();
+        return result;
+    }
+
     struct Node {
         std::atomic<Node*> next;
         union {
@@ -125,8 +186,7 @@ private:
     };
 
 private:
-    std::mutex m_mutex;
-    std::atomic<Node*> m_tail;
+    waitable_atomic<Node*> m_tail;
     std::atomic<Node*> m_head;
 };
 

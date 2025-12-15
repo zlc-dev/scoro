@@ -11,8 +11,12 @@
 #include <queue>
 #include <type_traits>
 #include <vector>
+#include "awaitable.hpp"
 #include "coro.hpp"
-#include "scheduler.hpp"
+#include "ptr/intrusive_ptr.hpp"
+#include "ptr/rc_ptr.hpp"
+
+namespace coro {
 
 using callback_t = void(*)(void* arg);
 
@@ -110,8 +114,6 @@ private:
     std::thread m_runner;
 };
 
-namespace coro {
-
 namespace detail {
     
     template<typename T>
@@ -156,27 +158,121 @@ class TimerWrapper: public Timer {
     struct SleepAwaitable {
         using Clock = typename Timer::Clock;
 
-        bool await_ready() const noexcept {
-            return Clock::now() >= m_wake_time;
+        auto operator co_await() && {
+            struct SleepAwaitableInner {
+                using Clock = typename Timer::Clock;
+
+                bool await_ready() const noexcept {
+                    return Clock::now() >= m_wake_time;
+                }
+
+                void await_suspend(std::coroutine_handle<> h) const noexcept {
+                    m_timer.add_task(
+                        m_wake_time,
+                        [](void* address) {
+                            std::coroutine_handle<>::from_address(address).resume();
+                        },
+                        h.address(), 
+                        [](void* address) {
+                            std::coroutine_handle<>::from_address(address).destroy();
+                        }
+                    );
+                }
+
+                void await_resume() const noexcept {}
+
+                std::chrono::time_point<Clock> m_wake_time;
+                TimerWrapper<Timer>& m_timer;
+            };
+
+            return SleepAwaitableInner(m_wake_time, m_timer);
         }
 
-        void await_suspend(std::coroutine_handle<> h) const noexcept {
+        std::chrono::time_point<Clock> m_wake_time;
+        TimerWrapper<Timer>& m_timer;
+    };
+
+    struct CancelableSleepAwaitable {
+        using Clock = typename Timer::Clock;
+
+        struct ControlBox: intrusive_ref_counter_mt<ControlBox> {
+            enum State {
+                ePending,
+                eCanceled,
+                eConsumed
+            };
+            std::coroutine_handle<> waiter { nullptr };
+            std::atomic<State> state { ePending };
+        };
+
+        CancelableSleepAwaitable(
+            std::chrono::time_point<Clock> wake_time,
+            TimerWrapper<Timer>& timer
+        ): m_wake_time(wake_time), m_timer(timer), m_cb(make_intrusive<ControlBox>()) {}
+
+        bool cancel() {
+            typename ControlBox::State expected = ControlBox::ePending;
+            if(m_cb->state.compare_exchange_strong(
+                expected, ControlBox::eCanceled, 
+                std::memory_order_acq_rel, std::memory_order_relaxed
+            )) {
+                if(m_cb->waiter) {
+                    m_cb->waiter.resume();
+                    m_cb->waiter = nullptr;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        bool await_ready() const noexcept {
+            return Clock::now() >= m_wake_time || m_cb->state.load(std::memory_order_acquire) != ControlBox::ePending;
+        }
+
+        void await_suspend(std::coroutine_handle<> h) noexcept {
+            m_cb->waiter = h;
+            intrusive_ptr_add_ref(m_cb.get());
             m_timer.add_task(
-                m_wake_time, 
+                m_wake_time,
                 [](void* address) {
-                    std::coroutine_handle<>::from_address(address).resume();
+                    intrusive_ptr<ControlBox> cb { static_cast<ControlBox*>(address) };
+                    intrusive_ptr_release(cb.get());
+                    typename ControlBox::State expected = ControlBox::ePending;
+                    if (cb->state.compare_exchange_strong(
+                        expected, ControlBox::eConsumed, 
+                        std::memory_order_acq_rel, std::memory_order_relaxed
+                    )) {
+                        if(cb->waiter) {
+                            cb->waiter.resume();
+                            cb->waiter = nullptr;
+                        }
+                    }
                 },
-                h.address(), 
+                m_cb.get(), 
                 [](void* address) {
-                    std::coroutine_handle<>::from_address(address).destroy();
+                    intrusive_ptr<ControlBox> cb { static_cast<ControlBox*>(address) };
+                    intrusive_ptr_release(cb.get());
+                    typename ControlBox::State expected = ControlBox::ePending;
+                    if(cb->state.compare_exchange_strong(
+                        expected, ControlBox::eCanceled, 
+                        std::memory_order_acq_rel, std::memory_order_relaxed
+                    )) {
+                        if(cb->waiter) {
+                            cb->waiter.resume();
+                            cb->waiter = nullptr;
+                        }
+                    }
                 }
             );
         }
 
-        void await_resume() const noexcept {}
+        bool await_resume() const noexcept {
+            return m_cb->state.load(std::memory_order_acquire) == ControlBox::eConsumed;
+        }
 
         std::chrono::time_point<Clock> m_wake_time;
         TimerWrapper<Timer>& m_timer;
+        intrusive_ptr<ControlBox> m_cb;
     };
 
     template<typename R>
@@ -293,17 +389,25 @@ public:
         return sleep_until(Clock::now() + dur);
     }
 
-    template<typename Scheduler = TrivialScheduler, typename Awaitable>
+    auto sleep_until_cancelable(const std::chrono::time_point<Clock>& wake_time) {
+        return CancelableSleepAwaitable { wake_time, *this };
+    }
+
+    template<typename Rep, typename Period>
+    auto sleep_for_cancelable(const std::chrono::duration<Rep, Period>& dur) {
+        return sleep_until_cancelable(Clock::now() + dur);
+    }
+
+    template<typename Awaitable>
     TimeoutFuture<Awaitable> with_timeout_until(Awaitable&& awaitable, const std::chrono::time_point<Clock>& timeout) {
         using Ret = decltype(std::declval<Awaitable>().await_resume());
-        auto r = co_await TimeoutAwaitable<Ret> { std::move(awaitable), timeout, *this };
-        co_await sched<Scheduler>();
+        auto r = co_await TimeoutAwaitable<Ret> { awaitable_cast_strict(std::forward<Awaitable>(awaitable)), timeout, *this };
         co_return std::move(r);
     }
 
-    template<typename Scheduler = TrivialScheduler, typename Awaitable, typename Rep, typename Period>
+    template<typename Awaitable, typename Rep, typename Period>
     auto with_timeout_for(Awaitable&& awaitable, const std::chrono::duration<Rep, Period>& duration) {
-        return with_timeout_until<Scheduler>(std::move(awaitable), Clock::now() + duration);
+        return with_timeout_until(awaitable_cast_strict(std::forward<Awaitable>(awaitable)), Clock::now() + duration);
     }
 
 };

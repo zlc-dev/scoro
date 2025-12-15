@@ -26,7 +26,7 @@ public:
     intrusive_ptr(intrusive_ptr<U>&& oth): m_ptr(static_cast<T*>(oth.get())) {
         oth.reset();
     }
- 
+
     ~intrusive_ptr() {
         if(m_ptr) intrusive_ptr_release(m_ptr);
         m_ptr = nullptr;
@@ -178,4 +178,3 @@ public:
         }
     }
 };
-

@@ -16,6 +16,7 @@
 
 namespace coro {
 
+
 namespace concepts {
 
 namespace detail {
@@ -36,6 +37,27 @@ concept awaitable = requires (T t, std::coroutine_handle<Promise> h) {
 };
 
 } // namespace concepts
+
+
+
+template<typename Awaitable>
+requires concepts::awaitable<Awaitable, void>
+static Awaitable awaitable_cast_strict(Awaitable&& awaitable) {
+    return std::forward<Awaitable>(awaitable);
+};
+
+template<typename Awaitable>
+requires (!concepts::awaitable<Awaitable, void>)
+static auto awaitable_cast_strict(Awaitable&& awaitable) {
+    if constexpr (requires { std::forward<Awaitable>(awaitable).operator co_await(); }) {
+        return awaitable_cast_strict(std::forward<Awaitable>(awaitable).operator co_await());
+    } else if constexpr (requires { operator co_await(std::forward<Awaitable>(awaitable)); }){
+        return awaitable_cast_strict(operator co_await(std::forward<Awaitable>(awaitable)));
+    } else {
+        static_assert(detail::meta::dependent_false<Awaitable>, "is not awaitable");
+    }
+}
+
 
 // No ownership, no return values, no exception storage.
 struct TrivialPromise {
@@ -62,20 +84,21 @@ private:
 
 template<typename Awaitable, typename Callback>
 TrivialFuture with_callback(
-    Awaitable awaitable,
+    Awaitable&& awaitable_,
     Callback callback
 ) noexcept {
-    using R = decltype(std::declval<Awaitable>().await_resume());
+    auto awaitable = awaitable_cast_strict(std::forward<Awaitable>(awaitable_));
+    using R = decltype(awaitable.await_resume());
 
     static_assert(std::is_invocable_v<decltype(callback), R> || 
               (std::is_same_v<R, void> && std::is_invocable_v<decltype(callback)>),
               "Callback must match awaitable result type");
 
     if constexpr (std::is_same_v<R, void>) {
-        co_await std::move(awaitable);
+        co_await awaitable;
         callback();
     } else {
-        auto result = co_await std::move(awaitable);
+        auto result = co_await awaitable;
         callback(std::move(result));
     }
 }
@@ -149,11 +172,6 @@ TrivialFuture forget(Awaitable awaitable) noexcept {
     co_await awaitable;
 }
 
-// Holds ownership, supports return values,
-// Stores exceptions and rethrows them on get() or await_resume().
-template<typename T, bool Nothrow>
-struct Promise;
-
 template<bool Nothrow>
 struct PromiseBase;
 
@@ -208,6 +226,8 @@ private:
     std::exception_ptr m_exception {};
 };
 
+// Holds ownership, supports return values,
+// Stores exceptions and rethrows them on get() or await_resume().
 template <typename T, bool Nothrow>
 struct Promise: public PromiseBase<Nothrow> {
 
@@ -224,6 +244,48 @@ struct Promise: public PromiseBase<Nothrow> {
     }
 
     T get() noexcept(Nothrow) {
+        if constexpr (!Nothrow)
+            PromiseBase<Nothrow>::throw_exception();
+        return std::move(m_value.value());
+    }
+
+private:
+    std::optional<T> m_value { std::nullopt };
+};
+
+template <typename T, bool Nothrow>
+struct Promise<T&, Nothrow>: public PromiseBase<Nothrow> {
+
+    std::coroutine_handle<Promise> get_return_object() {
+        return std::coroutine_handle<Promise>::from_promise(*this);
+    }
+
+    void return_value(T& value) {
+        m_value = &value;
+    }
+
+    T& get() noexcept(Nothrow) {
+        if constexpr (!Nothrow)
+            PromiseBase<Nothrow>::throw_exception();
+        return *m_value;
+    }
+
+private:
+    T* m_value { nullptr };
+};
+
+template <typename T, bool Nothrow>
+struct Promise<T&&, Nothrow>: public PromiseBase<Nothrow> {
+
+    std::coroutine_handle<Promise> get_return_object() {
+        return std::coroutine_handle<Promise>::from_promise(*this);
+    }
+
+    void return_value(T&& value) {
+        m_value.emplace(std::move(value));
+    }
+
+    T&& get() noexcept(Nothrow) {
         if constexpr (!Nothrow)
             PromiseBase<Nothrow>::throw_exception();
         return std::move(m_value.value());
@@ -339,7 +401,7 @@ protected:
     }
 
 private:
-    waitable_atomic_int m_state {};
+    waitable_atomic<bool> m_state {};
 };
 
 template <typename T, bool Nothrow>
@@ -358,6 +420,48 @@ struct WaitablePromise: public WaitablePromiseBase<Nothrow> {
     }
 
     T get() noexcept(Nothrow) {
+        if constexpr (!Nothrow)
+            WaitablePromiseBase<Nothrow>::throw_exception();
+        return std::move(m_value.value());
+    }
+
+private:
+    std::optional<T> m_value { std::nullopt };
+};
+
+template <typename T, bool Nothrow>
+struct WaitablePromise<T&, Nothrow>: public WaitablePromiseBase<Nothrow> {
+
+    std::coroutine_handle<WaitablePromise> get_return_object() {
+        return std::coroutine_handle<WaitablePromise>::from_promise(*this);
+    }
+
+    void return_value(T& value) {
+        m_value = &value;
+    }
+
+    T& get() noexcept(Nothrow) {
+        if constexpr (!Nothrow)
+            WaitablePromiseBase<Nothrow>::throw_exception();
+        return *m_value;
+    }
+
+private:
+    T* m_value { nullptr };
+};
+
+template <typename T, bool Nothrow>
+struct WaitablePromise<T&&, Nothrow>: public WaitablePromiseBase<Nothrow> {
+
+    std::coroutine_handle<WaitablePromise> get_return_object() {
+        return std::coroutine_handle<WaitablePromise>::from_promise(*this);
+    }
+
+    void return_value(T&& value) {
+        m_value.emplace(std::move(value));
+    }
+
+    T&& get() noexcept(Nothrow) {
         if constexpr (!Nothrow)
             WaitablePromiseBase<Nothrow>::throw_exception();
         return std::move(m_value.value());
@@ -407,7 +511,7 @@ public:
         m_coroutine.promise().set_caller(h);
     }
 
-    inline T await_resume() {
+    inline T await_resume() noexcept(Nothrow) {
         return m_coroutine.promise().get();
     }
 protected:
@@ -481,20 +585,26 @@ WaitableFuture<R, Nothrow> make_waitable(Awaitable awaitable) {
 struct CancelablePromiseBase {
 public:
 
-    inline void cancel() noexcept {
+    ~CancelablePromiseBase() {
+        cancel();
+    }
+
+    inline bool cancel() noexcept {
         switch (m_state.exchange(eCanceled, std::memory_order_acq_rel)) {
             case ePending:
+                return true;
             case eCanceled:
-                break;
+                return false;
             case eWaiting:
                 m_waiter.resume();
-                break;
+                return true;
             default:
-                break;
+                return false;
         }
     }
 
     inline auto wait_cancel() {
+
         struct CancelAwaitable {
             CancelAwaitable(CancelablePromiseBase& promise)
                 : m_promise(promise) {}
@@ -503,20 +613,35 @@ public:
 
             CancelAwaitable(CancelAwaitable&& oth) noexcept: m_promise(oth.m_promise) {};
 
-            bool await_ready() {
-                return m_promise.get_canceled();
-            }
+            auto operator co_await() && {
+                struct CancelAwaitableInner {
+                    CancelAwaitableInner(CancelablePromiseBase& promise)
+                        : m_promise(promise) {}
 
-            bool await_suspend(std::coroutine_handle<> handle) {
-                return m_promise.set_cancel_waiter(handle);
-            }
+                    CancelAwaitableInner(const CancelAwaitableInner&) = delete;
 
-            void await_resume() {}
+                    CancelAwaitableInner(CancelAwaitableInner&& oth) noexcept: m_promise(oth.m_promise) {};
+
+                    bool await_ready() const noexcept {
+                        return m_promise.get_canceled();
+                    }
+
+                    bool await_suspend(std::coroutine_handle<> handle) noexcept {
+                        std::coroutine_handle<> old_waiter = m_promise.reset_waiter();
+                        if (old_waiter) old_waiter.resume();
+                        return m_promise.set_cancel_waiter(handle);
+                    }
+
+                    void await_resume() const noexcept {}
+                private:
+                    CancelablePromiseBase& m_promise;
+                };
+                return CancelAwaitableInner { m_promise };
+            }
         private:
             CancelablePromiseBase& m_promise;
         };
-        std::coroutine_handle<> old_waiter = reset_waiter();
-        if (old_waiter) old_waiter.resume();
+
         return CancelAwaitable{ *this };
     }
 
@@ -556,56 +681,68 @@ private:
 
 template<typename T, bool Nothrow = false>
 struct CancelablePromise: public Promise<T, Nothrow>, private CancelablePromiseBase {
+private:
+    using cancelable_base = CancelablePromiseBase;
 public:
     using Promise<T, Nothrow>::Promise;
 
-    using CancelablePromiseBase::cancel;
-    using CancelablePromiseBase::wait_cancel;
+    auto final_suspend() noexcept {
+        cancel();
+        return Promise<T, Nothrow>::final_suspend(); 
+    }
 
+    using cancelable_base::cancel;
+    using cancelable_base::wait_cancel;
 };
-
 
 template<typename T, bool Nothrow = false>
 struct CancelableFuture: public Future<T, Nothrow> {
     using promise_type = CancelablePromise<T, Nothrow>;
-    using Future<T>::Future;
+    using Future<T, Nothrow>::Future;
 
-    void cancel() noexcept {
+    auto cancel() noexcept {
         std::coroutine_handle<promise_type> handle = 
             std::coroutine_handle<promise_type>::from_address(Future<T>::m_coroutine.address());
         promise_type& promise = handle.promise();
-        promise.cancel();
+        return promise.cancel();
     }
 };
 
 
 template<typename T, bool Nothrow = false>
 struct CancelableWaitablePromise: public WaitablePromise<T, Nothrow>, private CancelablePromiseBase {
+private:
+    using cancelable_base = CancelablePromiseBase;
 public:
     using WaitablePromise<T, Nothrow>::WaitablePromise;
 
-    using CancelablePromiseBase::cancel;
-    using CancelablePromiseBase::wait_cancel;
+    auto final_suspend() noexcept {
+        cancel();
+        return WaitablePromise<T, Nothrow>::final_suspend(); 
+    }
+
+    using cancelable_base::cancel;
+    using cancelable_base::wait_cancel;
 };
 
 template <typename T, bool Nothrow>
 struct [[nodiscard]] DetachedCancelableWaitableFuture: public DetachedWaitableFuture<T, Nothrow> {
 public:    
     
-    using promise_type = CancelableWaitablePromise<T>;
+    using promise_type = CancelableWaitablePromise<T, Nothrow>;
     using DetachedWaitableFuture<T, Nothrow>::DetachedWaitableFuture;
 
-    void cancel() noexcept {
+    auto cancel() noexcept {
         std::coroutine_handle<promise_type> handle = 
             std::coroutine_handle<promise_type>::from_address(DetachedWaitableFuture<T, Nothrow>::m_coroutine.address());
         promise_type& promise = handle.promise();
-        promise.cancel();
+        return promise.cancel();
     }
 };
 
 template<typename T, bool Nothrow = false>
 struct CancelableWaitableFuture: public WaitableFuture<T, Nothrow> {
-    using promise_type = CancelableWaitablePromise<T>;
+    using promise_type = CancelableWaitablePromise<T, Nothrow>;
     using WaitableFuture<T, Nothrow>::WaitableFuture;
 
     void cancel() noexcept {
