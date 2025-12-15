@@ -2,7 +2,6 @@
 
 #include "container/queue.hpp"
 #include "detail/meta.hpp"
-#include "expected.hpp"
 #include "coro.hpp"
 #include <atomic>
 #include <coroutine>
